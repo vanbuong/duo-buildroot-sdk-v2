@@ -16,15 +16,13 @@
 
 #include "remoteproc_internal.h"
 
-/* Security subsystem: programs C906L reset vector (same as FSBL reset_c906l). */
-#define SEC_SUBSYS_BASE		0x02000000
-#define SEC_SYS_BASE		(SEC_SUBSYS_BASE + 0x000B0000)
-#define SEC_SYS_CTRL		(SEC_SYS_BASE + 0x04)
-#define SEC_SYS_RESET_VECTOR_L	(SEC_SYS_BASE + 0x20)
-#define SEC_SYS_RESET_VECTOR_H	(SEC_SYS_BASE + 0x24)
-#define SEC_SYS_C906L_BOOT_BIT	BIT(13)
-
-/* Soft reset / clock gate for C906L: bit 6 holds the little core in reset. */
+/*
+ * Soft-reset bit for C906L (same register FSBL uses in reset_c906l).
+ * On aarch64, the SEC_SYS boot-vector registers (0x020B00xx) are not
+ * accessible from Linux/NS; FSBL already programs the reset vector to the
+ * FreeRTOS carveout. Arduino ELFs are linked to that same address, so we
+ * only need to pulse this reset bit — matching the V1 arduino branch.
+ */
 #define C906L_CLK_RST_ADDR	0x03003024
 #define C906L_CLK_RST_BIT	BIT(6)
 
@@ -45,81 +43,48 @@ struct cvitek_rproc {
 	u32 boot_offset;
 	int num_mems;
 	struct platform_device *pdev;
+	void __iomem *clk_reset;
 };
 
 static inline void clrbits_32(void __iomem *reg, u32 clear)
 {
-	iowrite32((ioread32(reg) & ~clear), reg);
+	writel(readl(reg) & ~clear, reg);
 }
 
 static inline void setbits_32(void __iomem *reg, u32 set)
 {
-	iowrite32(ioread32(reg) | set, reg);
+	writel(readl(reg) | set, reg);
 }
 
 static int cvitek_rproc_start(struct rproc *rproc)
 {
 	struct device *dev = rproc->dev.parent;
-	void __iomem *clk_reset;
-	void __iomem *sec_ctrl;
-	void __iomem *sec_vec_l;
-	void __iomem *sec_vec_h;
-	u64 bootaddr = rproc->bootaddr;
+	struct cvitek_rproc *cproc = rproc->priv;
 
-	/*
-	 * Match FSBL reset_c906l():
-	 *  1) assert C906L reset
-	 *  2) enable little-core boot from DRAM and write reset vector
-	 *  3) deassert reset so the core fetches from bootaddr
-	 *
-	 * Arduino / FreeRTOS ELFs are linked into the reserved FreeRTOS
-	 * DRAM carveout; bootaddr is ELF e_entry from the loader.
-	 */
-	clk_reset = ioremap(C906L_CLK_RST_ADDR, 4);
-	sec_ctrl = ioremap(SEC_SYS_CTRL, 4);
-	sec_vec_l = ioremap(SEC_SYS_RESET_VECTOR_L, 4);
-	sec_vec_h = ioremap(SEC_SYS_RESET_VECTOR_H, 4);
-	if (!clk_reset || !sec_ctrl || !sec_vec_l || !sec_vec_h) {
-		dev_err(dev, "failed to map C906L reset registers\n");
-		if (clk_reset)
-			iounmap(clk_reset);
-		if (sec_ctrl)
-			iounmap(sec_ctrl);
-		if (sec_vec_l)
-			iounmap(sec_vec_l);
-		if (sec_vec_h)
-			iounmap(sec_vec_h);
-		return -ENOMEM;
+	if (!cproc->clk_reset) {
+		dev_err(dev, "C906L reset register not mapped\n");
+		return -ENODEV;
 	}
 
-	clrbits_32(clk_reset, C906L_CLK_RST_BIT);
+	/* Assert reset, brief delay, deassert — core restarts at FSBL vector. */
+	clrbits_32(cproc->clk_reset, C906L_CLK_RST_BIT);
 	udelay(10);
+	setbits_32(cproc->clk_reset, C906L_CLK_RST_BIT);
 
-	setbits_32(sec_ctrl, SEC_SYS_C906L_BOOT_BIT);
-	iowrite32(lower_32_bits(bootaddr), sec_vec_l);
-	iowrite32(upper_32_bits(bootaddr), sec_vec_h);
-
-	setbits_32(clk_reset, C906L_CLK_RST_BIT);
-
-	iounmap(sec_vec_h);
-	iounmap(sec_vec_l);
-	iounmap(sec_ctrl);
-	iounmap(clk_reset);
-
-	dev_info(dev, "C906L started from 0x%llx\n", bootaddr);
+	dev_info(dev, "C906L released (ELF bootaddr 0x%llx)\n",
+		 rproc->bootaddr);
 
 	return 0;
 }
 
 static int cvitek_rproc_stop(struct rproc *rproc)
 {
-	void __iomem *clk_reset = ioremap(C906L_CLK_RST_ADDR, 4);
+	struct cvitek_rproc *cproc = rproc->priv;
 
-	if (!clk_reset)
-		return -ENOMEM;
+	if (!cproc->clk_reset)
+		return -ENODEV;
 
-	clrbits_32(clk_reset, C906L_CLK_RST_BIT);
-	iounmap(clk_reset);
+	clrbits_32(cproc->clk_reset, C906L_CLK_RST_BIT);
 
 	return 0;
 }
@@ -225,22 +190,14 @@ static const char *cvitek_rproc_get_firmware(struct platform_device *pdev)
 	return fw_name;
 }
 
-static int cvitek_rproc_parse_dt(struct platform_device *pdev)
-{
-	//TODO
-	return 0;
-}
-
 static int cvitek_rproc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	const struct of_device_id *match;
 	struct cvitek_rproc *cproc;
-	struct device_node *np = dev->of_node;
 	struct rproc *rproc;
 	const char *firmware;
 	int ret;
-	int i;
 
 	match = of_match_device(cvitek_rproc_match, dev);
 	if (!match) {
@@ -271,21 +228,24 @@ static int cvitek_rproc_probe(struct platform_device *pdev)
 	rproc->auto_boot = false;
 	cproc->pdev = pdev;
 
-	platform_set_drvdata(pdev, rproc);
-
-	ret = cvitek_rproc_parse_dt(pdev);
-	if (ret)
+	cproc->clk_reset = ioremap(C906L_CLK_RST_ADDR, 4);
+	if (!cproc->clk_reset) {
+		dev_err(dev, "failed to map C906L clk/reset at 0x%x\n",
+			C906L_CLK_RST_ADDR);
+		ret = -ENOMEM;
 		goto free_rproc;
+	}
+
+	platform_set_drvdata(pdev, rproc);
 
 	ret = rproc_add(rproc);
 	if (ret)
-		goto free_clk;
+		goto unmap_clk;
 
 	return 0;
 
-free_clk:
-	clk_unprepare(cproc->clk);
-
+unmap_clk:
+	iounmap(cproc->clk_reset);
 free_rproc:
 	rproc_free(rproc);
 	return ret;
@@ -295,12 +255,10 @@ static int cvitek_rproc_remove(struct platform_device *pdev)
 {
 	struct rproc *rproc = platform_get_drvdata(pdev);
 	struct cvitek_rproc *cproc = rproc->priv;
-	int i;
 
 	rproc_del(rproc);
-
-	clk_disable_unprepare(cproc->clk);
-
+	if (cproc->clk_reset)
+		iounmap(cproc->clk_reset);
 	rproc_free(rproc);
 
 	return 0;
