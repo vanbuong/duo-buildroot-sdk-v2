@@ -206,7 +206,10 @@ void __init setup_bootmem(void)
 	else
 		memblock_reserve(__pa(PAGE_OFFSET), LOAD_OFFSET);
 
-	early_init_fdt_scan_reserved_mem();
+	/*
+	 * Reserved-memory scan is deferred to setup_arch() after the DT is
+	 * unflattened so Cvitek remoteproc carveouts resolve correctly.
+	 */
 	memblock_allow_resize();
 	memblock_dump_all();
 }

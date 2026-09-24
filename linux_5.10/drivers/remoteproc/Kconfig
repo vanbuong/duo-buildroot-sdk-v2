@@ -288,6 +288,15 @@ config TI_K3_R5_REMOTEPROC
 	  It's safe to say N here if you're not interested in utilizing
 	  a slave processor.
 
+config CVITEK_REMOTEPROC
+	tristate "Cvitek C906L remoteproc support"
+	depends on ARCH_CVITEK
+	help
+	  Say Y here to control the Cvitek/Sophgo C906L little core via
+	  the remote processor framework (Arduino / FreeRTOS firmware).
+
+	  This can be either built-in or a loadable module.
+
 endif # REMOTEPROC
 
 endmenu
