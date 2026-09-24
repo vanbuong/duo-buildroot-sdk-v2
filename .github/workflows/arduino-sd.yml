@@ -1,0 +1,132 @@
+name: arduino-sdcard
+
+# Build SD card images that include remoteproc + burnd (Arduino upload daemon).
+# burnd is available for both:
+#   - glibc aarch64 big-core (SDK_VER=64bit)  -> br_overlay/64bit/usr/bin/burnd
+#   - musl riscv64 big-core (SDK_VER=musl_riscv64) -> br_overlay/musl_riscv64/usr/bin/burnd
+on:
+  push:
+    branches:
+      - cursor/arduino-remoteproc-port-0044
+      - main
+      - develop
+    paths:
+      - 'linux_5.10/drivers/remoteproc/**'
+      - 'device/generic/burnd/**'
+      - 'device/generic/br_overlay/**'
+      - 'device/generic/rootfs_overlay/**'
+      - 'build/boards/default/dts/**'
+      - 'build/boards/**/linux/*defconfig'
+      - '.github/workflows/arduino-sd.yml'
+  pull_request:
+    paths:
+      - 'linux_5.10/drivers/remoteproc/**'
+      - 'device/generic/burnd/**'
+      - 'device/generic/br_overlay/**'
+      - 'device/generic/rootfs_overlay/**'
+      - 'build/boards/default/dts/**'
+      - 'build/boards/**/linux/*defconfig'
+      - '.github/workflows/arduino-sd.yml'
+  workflow_dispatch:
+
+jobs:
+  verify-burnd:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross compilers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu file
+
+      - name: Rebuild burnd for aarch64 and riscv64
+        run: |
+          cd device/generic/burnd
+          ./install-overlays.sh
+
+      - name: Assert overlay binary architectures
+        run: |
+          set -e
+          file device/generic/br_overlay/64bit/usr/bin/burnd | tee /tmp/burnd-arm.txt
+          grep -qi 'aarch64\|ARM aarch64' /tmp/burnd-arm.txt
+
+          file device/generic/br_overlay/musl_riscv64/usr/bin/burnd | tee /tmp/burnd-rv.txt
+          grep -qi 'RISC-V\|UCB RISC-V' /tmp/burnd-rv.txt
+
+  build-sd:
+    needs: verify-burnd
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ARM64 big-core + C906L remoteproc (burnd aarch64)
+          - target: milkv-duo256m-glibc-arm64-sd
+          - target: milkv-duos-glibc-arm64-sd
+          # RISC-V big-core + C906L remoteproc (burnd riscv64)
+          - target: milkv-duo-musl-riscv64-sd
+          - target: milkv-duo256m-musl-riscv64-sd
+          - target: milkv-duos-musl-riscv64-sd
+
+    steps:
+      - name: Update Apt Cache
+        run: sudo apt update
+
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install Software
+        run: |
+          sudo apt install -y pkg-config build-essential ninja-build automake autoconf libtool wget curl \
+            git gcc libssl-dev bc slib squashfs-tools android-sdk-libsparse-utils jq tree \
+            python3-distutils scons parallel tree python3-dev python3-pip device-tree-compiler \
+            ssh cpio fakeroot libncurses5 flex bison libncurses5-dev genext2fs rsync unzip \
+            dosfstools mtools tcl openssh-client cmake expect python-is-python3 python3-jinja2 zstd \
+            gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu
+
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Checkout Host Tools
+        uses: actions/checkout@v4
+        with:
+          repository: 'milkv-duo/host-tools'
+          path: 'host-tools'
+
+      - name: Download packages
+        run: |
+          wget https://github.com/milkv-duo/duo-buildroot-sdk-v2/releases/download/dl/dl.tar
+          tar xf dl.tar -C buildroot/
+
+      - name: Ensure burnd overlays match target ISA
+        run: |
+          cd device/generic/burnd
+          ./install-overlays.sh
+          file ../br_overlay/64bit/usr/bin/burnd
+          file ../br_overlay/musl_riscv64/usr/bin/burnd
+
+      - name: Build ${{ matrix.target }}
+        run: |
+          ./build.sh ${{ matrix.target }}
+
+      - name: Compress artifacts
+        run: |
+          pushd out
+            zstd *
+          popd
+
+      - name: Upload ${{ matrix.target }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: out/*.zst
+          retention-days: 30
