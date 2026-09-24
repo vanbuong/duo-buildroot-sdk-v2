@@ -32,7 +32,7 @@
 		compatible = "cvitek,cv18xx-c906l-rproc";
 		memory-region = <&c906l>;
 		core-name = "cv18xx-c906l";
-		firmware-name = "cvirtos.elf";
+		firmware-name = "arduino.elf";
 		status = "okay";
 	};
 };

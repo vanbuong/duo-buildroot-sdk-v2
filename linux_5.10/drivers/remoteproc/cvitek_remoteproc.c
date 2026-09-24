@@ -260,6 +260,15 @@ static int cvitek_rproc_probe(struct platform_device *pdev)
 	cproc = rproc->priv;
 
 	rproc->has_iommu = false;
+	/*
+	 * Do not auto-boot on probe. Default DT firmware (arduino.elf /
+	 * cvirtos.elf) is often absent from /lib/firmware at boot; auto-boot
+	 * would call request_firmware(), hold rproc->lock for a long time,
+	 * and make `echo start` appear to hang until Ctrl-C (-EINTR / -4).
+	 * burnd and the USB overlay scripts start the core explicitly after
+	 * the ELF is written.
+	 */
+	rproc->auto_boot = false;
 	cproc->pdev = pdev;
 
 	platform_set_drvdata(pdev, rproc);
