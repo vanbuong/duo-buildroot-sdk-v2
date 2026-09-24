@@ -9,7 +9,16 @@ struct of_phandle_args;
 struct reserved_mem_ops;
 
 struct reserved_mem {
+	/*
+	 * Cvitek historically truncated reserved-memory names to 8 bytes.
+	 * remoteproc needs the full node name (e.g. for carveout lookup),
+	 * so keep a pointer when CONFIG_CVITEK_REMOTEPROC is enabled.
+	 */
+#if defined(CONFIG_ARCH_CVITEK) && !defined(CONFIG_CVITEK_REMOTEPROC)
 	char				name[8];
+#else
+	char				*name;
+#endif
 	unsigned long			fdt_node;
 	unsigned long			phandle;
 	const struct reserved_mem_ops	*ops;
