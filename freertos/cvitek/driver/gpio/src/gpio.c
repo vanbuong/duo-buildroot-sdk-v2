@@ -6,44 +6,78 @@
 #include "mmio.h"
 #include "gpio.h"
 
+static uint32_t gpio_base_from_pin(int pin)
+{
+	switch ((pin >> 8) & 0xF) {
+	case 0xB:
+		return CVI_GPIOB_BASE;
+	case 0xC:
+		return CVI_GPIOC_BASE;
+	case 0xD:
+		return CVI_GPIOD_BASE;
+	case 0xA:
+		return CVI_GPIOA_BASE;
+	default:
+		return 0;
+	}
+}
 
 int gpio_is_valid(int pin)
 {
-	switch ((pin >> 8)) {
-		case 0xA:
-		case 0xB:
-		case 0xC:
-		case 0xD:
-			return 1;
-		default:
-			return 0;
-	}
+	return gpio_base_from_pin(pin) != 0;
 }
 
 void gpio_direction_output(int pin, int val)
 {
-	uint32_t gpio_base;
+	uint32_t gpio_base = gpio_base_from_pin(pin);
+	uint32_t bit;
 
-	switch ((pin >> 8)) {
-		case 0xB:
-			gpio_base = CVI_GPIOB_BASE;
-			break;
-		case 0xC:
-			gpio_base = CVI_GPIOC_BASE;
-			break;
-		case 0xD:
-			gpio_base = CVI_GPIOD_BASE;
-			break;
-		case 0xA:
-			gpio_base = CVI_GPIOA_BASE;
-			break;
-		default:
-			return;
-	}
+	if (!gpio_base)
+		return;
 
-	pin &= 0xff;
-	// GPIO_OE
-	mmio_write_32(gpio_base + 4, 1 << pin);
-	// GPIO_O
-	mmio_write_32(gpio_base, val << pin);
+	bit = 1U << (pin & 0xff);
+	mmio_setbits_32(gpio_base + GPIO_SWPORTA_DDR, bit);
+	if (val)
+		mmio_setbits_32(gpio_base + GPIO_SWPORTA_DR, bit);
+	else
+		mmio_clrbits_32(gpio_base + GPIO_SWPORTA_DR, bit);
+}
+
+void gpio_direction_input(int pin)
+{
+	uint32_t gpio_base = gpio_base_from_pin(pin);
+	uint32_t bit;
+
+	if (!gpio_base)
+		return;
+
+	bit = 1U << (pin & 0xff);
+	mmio_clrbits_32(gpio_base + GPIO_SWPORTA_DDR, bit);
+}
+
+void gpio_set_value(int pin, int val)
+{
+	uint32_t gpio_base = gpio_base_from_pin(pin);
+	uint32_t bit;
+
+	if (!gpio_base)
+		return;
+
+	bit = 1U << (pin & 0xff);
+	if (val)
+		mmio_setbits_32(gpio_base + GPIO_SWPORTA_DR, bit);
+	else
+		mmio_clrbits_32(gpio_base + GPIO_SWPORTA_DR, bit);
+}
+
+int gpio_get_value(int pin)
+{
+	uint32_t gpio_base = gpio_base_from_pin(pin);
+	uint32_t bit;
+
+	if (!gpio_base)
+		return 0;
+
+	bit = 1U << (pin & 0xff);
+	return (mmio_read_32(gpio_base + GPIO_EXT_PORTA) & bit) ? 1 : 0;
 }
