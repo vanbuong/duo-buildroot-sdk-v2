@@ -20,7 +20,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SAFETY_FLAGS}")
 set(build_list
 	uart
 	pinmux
-	# i2c
+	# i2c — DW HAL IRQ symbols incomplete on riscv64; balance_car uses polling I2C
 	snsr_i2c
 	cif
 	# ccf
