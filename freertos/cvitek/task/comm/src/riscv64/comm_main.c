@@ -155,8 +155,10 @@ void main_cvirtos(void)
 
 	main_create_tasks();
 
+#ifdef BALANCE_CAR_ENABLE
 	/* Two-wheel balance car: IMU + TB6612 + encoders on little core. */
 	balance_car_start();
+#endif
 
 	/* Start the tasks and timer running. */
 	vTaskStartScheduler();
