@@ -9,11 +9,11 @@ Design: 2 data lanes + clock (6 HS wires) -> FPGA pins 79-84 as 3 differential p
   (netclass MIPI_DPHY_100R, 0.25/0.2 mm are starting values: confirm with the KiCad calculator for your stackup).
 
 ## Must verify before fab
-1. J1 pin order is a placeholder - use the Duo S schematic's DSI connector pinout (and its connector type/pitch).
+1. J1 now follows the Duo S CON26A schematic (pair0=D0 on pins 1/3, pair1=D1 on 2/4, pair2=CLK on 7/9; D2/D3 on 8/10, 13/15 unused). Confirm the physical connector type/pitch for your mating method.
 2. J2 pin order is a placeholder - check physical header positions of 79..85 on the Tang Nano 9K, and that
    they form true LVDS pairs (_T/_C) in the GW1NR-9 pinout. If not, remap pairs or receive single-ended.
 3. D-PHY HS is ~200 mV swing around ~200 mV common mode: check the Gowin LVDS input common-mode range at 1.8 V VCCO.
    If marginal, use an external D-PHY->LVDS receiver / resistor network (e.g. Xilinx XAPP894 style).
-4. The DSI TX is configured via Duo S panel params (lane_id / lane_pn_swap in cvi_mpi/component/panel/cv181x/*.h);
+4. Lane map matches the SDK 2-lane panel config {LANE_0, LANE_1, LANE_CLK}. The DSI TX is configured via Duo S panel params (lane_id / lane_pn_swap in cvi_mpi/component/panel/cv181x/*.h);
    swap P/N there if the routing ends up crossed.
 5. File generated without KiCad available: open, run ERC/DRC, and re-save.
