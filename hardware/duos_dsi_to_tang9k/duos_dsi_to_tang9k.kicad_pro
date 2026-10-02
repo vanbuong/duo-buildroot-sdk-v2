@@ -47,6 +47,10 @@
       {
         "netclass": "MIPI_DPHY_100R",
         "pattern": "DSI_*"
+      },
+      {
+        "netclass": "MIPI_DPHY_100R",
+        "pattern": "HS_*"
       }
     ]
   }
