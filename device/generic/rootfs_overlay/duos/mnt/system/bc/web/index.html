@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Balance robot</title>
+<style>
+  :root { --bg:#10151c; --fg:#e6edf3; --muted:#8b98a5; --accent:#3ea6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --card:#18202a; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f4f6f8; --fg:#1b2430; --muted:#5b6672; --card:#ffffff; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui, sans-serif; padding:0 16px 24px; }
+  h1 { font-size:18px; margin:14px 0 8px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; }
+  .card { background:var(--card); border-radius:10px; padding:12px; flex:1 1 280px; }
+  .state { font-size:22px; font-weight:600; }
+  .st-BALANCING { color:var(--ok); } .st-FAULT,.st-ESTOP,.st-FALLEN { color:var(--bad); } .st-ARMING,.st-CALIBRATING { color:var(--warn); }
+  table { width:100%; border-collapse:collapse; } td { padding:2px 0; } td:last-child { text-align:right; font-variant-numeric:tabular-nums; }
+  button { font:inherit; padding:10px 14px; border-radius:8px; border:0; background:var(--accent); color:#fff; margin:2px; cursor:pointer; }
+  button.danger { background:var(--bad); } button.sec { background:#566574; }
+  #stick { width:220px; height:220px; border-radius:50%; background:var(--bg); border:2px solid var(--muted); position:relative; touch-action:none; margin:6px auto; }
+  #knob { width:70px; height:70px; border-radius:50%; background:var(--accent); position:absolute; left:75px; top:75px; }
+  canvas { width:100%; height:120px; background:var(--bg); border-radius:6px; }
+  input { font:inherit; width:90px; padding:6px; border-radius:6px; border:1px solid var(--muted); background:var(--bg); color:var(--fg); }
+  .muted { color:var(--muted); } #msg { min-height:1.4em; }
+</style>
+</head>
+<body>
+<h1>Balance robot <span id="conn" class="muted">connecting…</span></h1>
+<div class="row">
+  <div class="card">
+    <div class="state" id="state">–</div>
+    <div class="muted" id="fault"></div>
+    <table>
+      <tr><td>Pitch</td><td id="pitch">–</td></tr>
+      <tr><td>Pitch (accel only)</td><td id="pitchacc">–</td></tr>
+      <tr><td>Speed L / R [m/s]</td><td id="speed">–</td></tr>
+      <tr><td>Motor drive [%]</td><td id="u">–</td></tr>
+      <tr><td>Loop period / exec [µs]</td><td id="timing">–</td></tr>
+      <tr><td>Wi-Fi RSSI [dBm]</td><td id="rssi">–</td></tr>
+      <tr><td>RTOS alive / lost records</td><td id="alive">–</td></tr>
+    </table>
+    <canvas id="plot" width="600" height="120"></canvas>
+  </div>
+  <div class="card">
+    <div style="text-align:center">
+      <div id="stick"><div id="knob"></div></div>
+      <div class="muted">Drag: up = forward, sideways = turn. Release = stop.</div>
+    </div>
+    <div style="text-align:center; margin-top:8px">
+      <button onclick="send({t:'arm'})">Arm</button>
+      <button class="sec" onclick="send({t:'disarm'})">Disarm</button>
+      <button class="danger" onclick="send({t:'estop'})">E-STOP</button><br>
+      <button class="sec" onclick="send({t:'calib',what:'gyro'})">Calibrate gyro</button>
+      <button class="sec" onclick="send({t:'calib',what:'trim'})">Set level trim</button>
+    </div>
+  </div>
+  <div class="card">
+    <b>Parameter</b><br>
+    <input id="pname" list="plist" placeholder="a_kp"> <input id="pval" placeholder="value">
+    <button onclick="setParam()">Set</button> <button class="sec" onclick="send({t:'save'})">Save</button>
+    <datalist id="plist"></datalist>
+    <div id="msg" class="muted"></div>
+    <div class="muted">Video: open <code id="rtsp"></code> in VLC/ffplay.</div>
+  </div>
+</div>
+<script>
+const VMAX = 0.5, WMAX = 2.0;
+let ws, target = {v:0, w:0}, hist = [];
+document.getElementById('rtsp').textContent = 'rtsp://' + location.hostname + ':554/live';
+function connect() {
+  ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.onopen = () => { conn.textContent = 'connected'; send({t:'params'}); };
+  ws.onclose = () => { conn.textContent = 'disconnected'; setTimeout(connect, 1000); };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.t === 'tel') showTel(m);
+    else if (m.t === 'state') msg.textContent = 'state → ' + m.state + (m.fault !== 'NONE' ? ' (' + m.fault + ')' : '');
+    else if (m.t === 'param_result') msg.textContent = m.k + ': ' + (m.ok ? 'ok' : 'rejected - ' + m.msg);
+    else if (m.t === 'params') { plist.innerHTML = Object.keys(m.params).map(k => '<option value="' + k + '">').join(''); }
+    else if (m.t === 'error') msg.textContent = m.msg;
+  };
+}
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function showTel(m) {
+  state.textContent = m.state; state.className = 'state st-' + m.state;
+  fault.textContent = m.fault === 'NONE' ? '' : 'fault: ' + m.fault;
+  pitch.textContent = m.pitch.toFixed(2) + '°'; pitchacc.textContent = m.pitch_acc.toFixed(2) + '°';
+  speed.textContent = m.vl.toFixed(2) + ' / ' + m.vr.toFixed(2); u.textContent = m.u.toFixed(1);
+  timing.textContent = m.period_us + ' / ' + m.exec_us;
+  rssi.textContent = m.rssi === null ? '–' : m.rssi; alive.textContent = (m.rtos ? 'yes' : 'NO') + ' / ' + m.lost;
+  hist.push(m.pitch); if (hist.length > 300) hist.shift(); draw();
+}
+function draw() {
+  const c = plot, g = c.getContext('2d'); g.clearRect(0, 0, c.width, c.height);
+  g.strokeStyle = '#566574'; g.beginPath(); g.moveTo(0, 60); g.lineTo(600, 60); g.stroke();
+  g.strokeStyle = '#3ea6ff'; g.beginPath();
+  hist.forEach((v, i) => { const x = i * 2, y = 60 - v * 2; i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
+}
+function setParam() {
+  const v = parseFloat(pval.value); if (!pname.value || isNaN(v)) return;
+  send({t:'param', k:pname.value, v:v});
+}
+// joystick
+const st = document.getElementById('stick'), kb = document.getElementById('knob');
+let active = false, timer = null;
+function move(ev) {
+  const r = st.getBoundingClientRect(), p = ev.touches ? ev.touches[0] : ev;
+  let x = (p.clientX - r.left - r.width / 2) / (r.width / 2), y = (p.clientY - r.top - r.height / 2) / (r.height / 2);
+  const d = Math.hypot(x, y); if (d > 1) { x /= d; y /= d; }
+  kb.style.left = (75 + x * 75) + 'px'; kb.style.top = (75 + y * 75) + 'px';
+  const dz = v => Math.abs(v) < 0.08 ? 0 : v;
+  target = { v: -dz(y) * VMAX, w: -dz(x) * WMAX };
+}
+function down(ev) { active = true; move(ev); ev.preventDefault();
+  if (!timer) timer = setInterval(() => send({t:'ctl', v:target.v, w:target.w, dead_man:true}), 50); }
+function up() { active = false; target = {v:0, w:0}; kb.style.left = '75px'; kb.style.top = '75px';
+  send({t:'ctl', v:0, w:0}); clearInterval(timer); timer = null; }
+st.addEventListener('pointerdown', down); window.addEventListener('pointermove', e => active && move(e));
+window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
+connect();
+</script>
+</body>
+</html>

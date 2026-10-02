@@ -17,8 +17,10 @@ TEST_SRCS := test_main.c test_pid.c test_encoder.c test_mpu.c test_params.c \
              test_estimator.c test_control.c test_state.c test_health_cmd.c \
              test_shm.c test_sim.c sim_plant.c stubs/fake_hw.c
 BIN := build/balance_tests
+TOOLS := build/layout_dump build/shm_tool
+PYDIR := ../linux_tests
 
-.PHONY: all test clean coverage
+.PHONY: all test clean coverage tools pytest
 all: $(BIN)
 test: $(BIN)
 	./$(BIN)
@@ -41,3 +43,14 @@ coverage:
 	        printf "coverage %-8s %5.1f%% (min %d%%)\n", f, pct, min; if (pct < min) bad=1} END {exit bad}' \
 	      || exit 1; \
 	  done
+
+# Cross-language tools + Python tests of the Linux side (bcd, bc_shm, bc_camera).
+tools: $(TOOLS)
+build/layout_dump: layout_dump.c $(SRC)/bc_params.c ../include/*.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) layout_dump.c $(SRC)/bc_params.c -o $@ $(LDLIBS)
+build/shm_tool: shm_tool.c $(SRC)/bc_params.c ../include/*.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) shm_tool.c $(SRC)/bc_params.c -o $@ $(LDLIBS)
+pytest: tools
+	cd $(PYDIR) && BC_TOOLS=$(CURDIR)/build python3 -m unittest discover -v -p 'test_*.py'

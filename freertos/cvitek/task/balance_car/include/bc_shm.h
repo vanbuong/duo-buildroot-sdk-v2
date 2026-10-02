@@ -117,6 +117,7 @@ typedef struct {
 #define BC_EVT_LOG_PARAMS	3	/* arg = result, val = block seq         */
 #define BC_EVT_LOG_CALIB	4	/* arg = kind, val = result              */
 #define BC_EVT_LOG_TIMING	5	/* arg = 0, val = period_us              */
+#define BC_EVT_LOG_PONG		6	/* val = nonce of the PING               */
 
 typedef struct {
 	bc_shm_hdr_t hdr;				/* 0x0000 */

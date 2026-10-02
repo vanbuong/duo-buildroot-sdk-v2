@@ -71,6 +71,15 @@ void bc_rt_send_evt(uint8_t cmd_id, uint32_t param)
 	QueueHandle_t q = main_GetMODHandle(E_QUEUE_BALANCE);
 	cmdqu_t m = { 0 };
 
+#if !BC_MBOX_EVENTS
+	/* The stock Linux rtos_cmdqu driver logs an error for every message with an
+	 * ip_id nobody registered for; events are also in the shm event ring. */
+	(void)cmd_id;
+	(void)param;
+	(void)q;
+	(void)m;
+	return;
+#endif
 	if (!q)
 		return;
 	m.ip_id = IP_BALANCE;
@@ -103,6 +112,7 @@ static void handle_cmd(const cmdqu_t *m)
 	bc_event_push(shm, bc_now_us(), BC_EVT_LOG_CMD, m->cmd_id, (int32_t)p);
 	switch (m->cmd_id) {
 	case BC_CMD_PING:
+		bc_event_push(shm, bc_now_us(), BC_EVT_LOG_PONG, 0, (int32_t)p);
 		bc_rt_send_evt(BC_EVT_PONG, p);
 		break;
 	case BC_CMD_ARM:

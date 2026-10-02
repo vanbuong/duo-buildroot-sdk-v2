@@ -16,6 +16,12 @@
 #include "bc_params.h"
 #include "bc_shm.h"
 
+/* 1: also send BC_EVT_* through the mailbox (needs a Linux handler registered with
+ * request_rtos_irq(IP_BALANCE, ...)); 0: shm event ring only (default). */
+#ifndef BC_MBOX_EVENTS
+#define BC_MBOX_EVENTS	0
+#endif
+
 /* ---- RTOS shared-memory window (linker symbol, see cv181x_lscript.ld) ---- */
 extern char _bc_shm_base[];
 #define BC_SHM()	((volatile bc_shm_t *)(void *)_bc_shm_base)
