@@ -19,12 +19,15 @@ int gpio_get_value(int pin) { return fake_gpio_get(pin); }
 static uint8_t g_regs[256];
 static int g_fail_reads;
 static int g_writes;
+static void (*g_read_hook)(void);
+void fake_i2c_set_read_hook(void (*hook)(void)) { g_read_hook = hook; }
 
 void fake_i2c_reset(void)
 {
 	memset(g_regs, 0, sizeof(g_regs));
 	g_fail_reads = 0;
 	g_writes = 0;
+	g_read_hook = 0;
 }
 void fake_i2c_set_reg(uint8_t reg, uint8_t val) { g_regs[reg] = val; }
 uint8_t fake_i2c_get_reg(uint8_t reg) { return g_regs[reg]; }
@@ -64,6 +67,8 @@ int poll_i2c_read(uint8_t bus_id, uint8_t addr, uint8_t reg,
 	uint16_t i;
 
 	(void)bus_id; (void)addr;
+	if (g_read_hook)
+		g_read_hook();
 	if (g_fail_reads)
 		return -1;
 	for (i = 0; i < len; i++)

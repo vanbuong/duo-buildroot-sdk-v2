@@ -1,185 +1,242 @@
 /*
- * Closed-loop tests: the real pid.c + mpu60x0.c run against a simulated
- * wheeled inverted pendulum (sim_plant.c). The loop below mirrors
- * balance_ctrl_task() in src/balance_main.c (200 Hz, same data flow).
+ * Closed-loop tests: the real bc_core (estimator + state machine +
+ * controller) and the real MPU driver run against a simulated wheeled
+ * inverted pendulum (sim_plant.c). The IMU values travel through the fake
+ * I2C register file, so frame decoding, scaling and the health monitor are
+ * exercised too. The loop mirrors balance_ctrl_task() in src/balance_main.c.
  */
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include "unity_lite.h"
-#include "pid.h"
+#include "bc_core.h"
 #include "mpu60x0.h"
 #include "fake_hw.h"
 #include "sim_plant.h"
 
 #define RAD2DEG 57.2957795
+#define DT 0.005
 
 typedef struct {
-	double angle_kp, angle_kd;
-	double speed_kp, speed_ki, speed_clamp;
-	double ku;			/* plant gain override */
-	double theta0_deg;		/* initial lean */
-	double accel_noise_g;		/* uniform +-, per axis */
-	double gyro_noise_dps;		/* uniform +- */
-	double push_at_s, push_rad_s;	/* impulse on pitch rate */
-	double seconds;
-	/* estimator: 0 = shipped mpu60x0_update_angle() (alpha 0.98) */
-	double est_alpha;		/* >0: reference estimator, see est_update() */
-	double est_gate_g;		/* skip accel when | |a|-1g | > gate (0=off) */
+	bc_params_t p;
+	double ku;			/* plant gain override                */
+	double theta0_deg;		/* lean at the moment the car is released */
+	double accel_noise_g;
+	double gyro_noise_dps;
+	double push_at_s, push_rad_s;	/* impulse on pitch rate, after release */
+	double unplug_at_s;		/* IMU stops answering, <0 = never    */
+	double seconds;			/* simulated time after release       */
 } sim_cfg_t;
 
 typedef struct {
 	double max_theta_deg;
-	double tail_theta_deg;		/* max |theta| over the last second */
+	double tail_theta_deg;		/* max |theta| over the last second   */
 	double max_x_m;
-	double tail_speed_mps;		/* max |v| over the last second */
-	int fell;			/* firmware would have disarmed (>45 deg) */
+	double tail_speed_mps;
+	int fell;			/* core went to FALLEN/FAULT after release */
+	int released;			/* reached BALANCING                  */
+	bc_state_id_t final_state;
+	bc_fault_t final_fault;
+	int cycles_to_fault;		/* after unplug; -1 if no fault       */
+	double motor_after_fault;	/* max |motor| after a fault          */
+	int seq_ok;			/* CALIBRATING->IDLE->ARMING->BALANCING seen in order */
+	double arming_s;
 } sim_res_t;
 
 static uint32_t g_rng = 12345;
-static double urand(void)	/* deterministic, in [-1, 1] */
+static double urand(void)
 {
 	g_rng = g_rng * 1664525u + 1013904223u;
 	return ((g_rng >> 8) & 0xFFFF) / 32768.0 - 1.0;
 }
 
-/*
- * Reference estimator for the planned firmware change (docs/balance_car/03):
- * complementary filter with a larger gyro weight plus an accel-norm gate that
- * ignores the accelerometer while the car itself is accelerating hard.
- */
-static void est_update(mpu60x0_t *m, double alpha, double gate_g, double dt)
+static int16_t sat16(double v)
 {
-	double ax = m->ax / 16384.0, ay = m->ay / 16384.0, az = m->az / 16384.0;
-	double gy = m->gy / 131.0 - m->gyro_bias_y;
-	double norm = sqrt(ax * ax + ay * ay + az * az);
-	double acc_pitch = atan2(-ax, sqrt(ay * ay + az * az)) * RAD2DEG;
-	double pred = m->angle_deg + gy * dt;
-
-	if (gate_g > 0 && fabs(norm - 1.0) > gate_g)
-		m->angle_deg = (float)pred;	/* gyro only */
-	else
-		m->angle_deg = (float)(alpha * pred + (1.0 - alpha) * acc_pitch);
+	return (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
 }
 
 static sim_cfg_t cfg_default(void)
 {
-	sim_cfg_t c = { 0 };
+	sim_cfg_t c;
 
-	c.angle_kp = 25.0; c.angle_kd = 0.8;
-	c.speed_kp = 0.0; c.speed_ki = 0.0; c.speed_clamp = 15.0;
-	c.ku = 0.05; c.theta0_deg = 5.0; c.seconds = 10.0;
-	c.push_at_s = -1.0;
+	memset(&c, 0, sizeof(c));
+	bc_params_default(&c.p);
+	c.ku = 0.05; c.theta0_deg = 5.0; c.seconds = 15.0;
+	/* baseline MPU noise (a perfectly noiseless sensor would trip the
+	 * stuck-frame detector, rightly) */
+	c.accel_noise_g = 0.004; c.gyro_noise_dps = 0.05;
+	c.push_at_s = -1.0; c.unplug_at_s = -1.0;
 	return c;
 }
 
 static sim_res_t run_sim(const sim_cfg_t *c)
 {
-	const double dt = 0.005;
-	const int n = (int)(c->seconds / dt);
-	bc_pid_t pa, ps;
-	mpu60x0_t imu = { 0 };
+	bc_core_t core;
+	bc_core_in_t in;
+	bc_core_out_t out;
+	mpu60x0_t imu;
 	plant_t pl;
-	sim_res_t r = { 0 };
-	double prev_cnt = 0;
-	int i, pushed = 0;
+	sim_res_t r;
+	long i, n_after = 0, total = 0;
+	double t_rel = -1, prev_cnt = 0;
+	int pushed = 0, unplugged = 0, fault_cycles = -1;
+	int saw_calib = 0, saw_idle = 0, saw_arming = 0, saw_bal = 0, order_ok = 1;
+	bc_state_id_t prev_state = BC_ST_BOOT;
 
+	memset(&r, 0, sizeof(r));
+	memset(&in, 0, sizeof(in));
+	memset(&out, 0, sizeof(out));
+	memset(&imu, 0, sizeof(imu));
+	r.cycles_to_fault = -1;
 	g_rng = 12345;
 	fake_i2c_reset();
 	plant_init(&pl);
 	pl.ku = c->ku;
-	pl.theta = c->theta0_deg / RAD2DEG;
-	imu.angle_deg = (float)c->theta0_deg;	/* robot held at start angle */
-	pid_init(&pa, (float)c->angle_kp, 0.0f, (float)c->angle_kd, -90.0f, 90.0f);
-	pid_init(&ps, (float)c->speed_kp, (float)c->speed_ki, 0.0f,
-		 (float)-c->speed_clamp, (float)c->speed_clamp);
+	bc_core_init(&core, &c->p);
+	(void)prev_cnt;
 
-	for (i = 0; i < n; i++) {
-		double t = i * dt, s = sin(pl.theta), co = cos(pl.theta);
-		double cnt, speed, aset, motor, lin_a_g;
+	for (i = 0; ; i++) {
+		double t = i * DT, th = pl.theta, s = sin(th), co = cos(th);
+		double lin_a_g = pl.ku * pl.u_applied / 9.81;
+		mpu60x0_scaled_t sc;
+		int ok;
+		double t_after = (t_rel < 0) ? -1 : t - t_rel;
 
-		if (!pushed && c->push_at_s >= 0 && t >= c->push_at_s) {
+		if (t_rel >= 0 && t_after >= c->seconds)
+			break;
+		if (i > 200000)
+			break;
+		if (t_rel < 0 && i > 4000)
+			break;			/* never armed */
+
+		if (t_rel >= 0 && !pushed && c->push_at_s >= 0 && t_after >= c->push_at_s) {
 			pl.omega += c->push_rad_s;
 			pushed = 1;
 		}
-		/* Accelerometer also sees the wheel acceleration (ax). */
-		lin_a_g = pl.ku * pl.u_applied / 9.81;
+		if (t_rel >= 0 && !unplugged && c->unplug_at_s >= 0 && t_after >= c->unplug_at_s) {
+			fake_i2c_fail_reads(1);
+			unplugged = 1;
+			fault_cycles = 0;
+		}
+
+		/* what the IMU measures (accel includes the wheel acceleration) */
 		fake_i2c_set_accel_gyro(
-			(int16_t)((-s + lin_a_g * co + c->accel_noise_g * urand()) * 16384.0),
-			(int16_t)(c->accel_noise_g * urand() * 16384.0),
-			(int16_t)((co + lin_a_g * s + c->accel_noise_g * urand()) * 16384.0),
+			sat16((-s + lin_a_g * co + c->accel_noise_g * urand()) * MPU_ACCEL_LSB_PER_G),
+			sat16(c->accel_noise_g * urand() * MPU_ACCEL_LSB_PER_G),
+			sat16((co + lin_a_g * s + c->accel_noise_g * urand()) * MPU_ACCEL_LSB_PER_G),
 			0,
-			(int16_t)((pl.omega * RAD2DEG + c->gyro_noise_dps * urand()) * 131.0),
+			sat16((pl.omega * RAD2DEG + c->gyro_noise_dps * urand()) * MPU_GYRO_LSB_PER_DPS),
 			0);
-		mpu60x0_read(&imu);
-		if (c->est_alpha > 0)
-			est_update(&imu, c->est_alpha, c->est_gate_g, dt);
-		else
-			mpu60x0_update_angle(&imu, (float)dt);
+		ok = (mpu60x0_read(&imu) == 0);
+		mpu60x0_scale(&imu, &sc);
 
-		cnt = plant_encoder_counts(&pl);
-		speed = (cnt - prev_cnt) / dt;	/* counts/s, as in firmware */
-		prev_cnt = cnt;
+		in.imu_ok = ok;
+		in.raw = imu.raw;
+		in.ax = sc.ax; in.ay = sc.ay; in.az = sc.az;
+		in.gy = sc.gy; in.gz = sc.gz;
+		in.raw_gx = imu.gx; in.raw_gy = imu.gy; in.raw_gz = imu.gz;
+		in.enc_l = in.enc_r = (int32_t)plant_encoder_counts(&pl);
+		in.v_target = in.w_target = 0.0f;
+		in.dt = (float)DT;
+		in.timing_fault = 0;
+		in.events = 0;
+		if (i == 0) in.events = BC_EV_CALIB_REQ;
+		if (i == 1) in.events = BC_EV_CALIB_OK;
+		if (i == 2) in.events = BC_EV_ARM;
+		bc_core_step(&core, &in, &out);
 
-		aset = pid_update(&ps, 0.0f, (float)speed, (float)dt);
-		motor = pid_update(&pa, (float)aset, imu.angle_deg, (float)dt);
-		if (fabs(imu.angle_deg) > 45.0 && !r.fell)
-			r.fell = 1;	/* firmware would coast here */
-		plant_step(&pl, r.fell ? 0.0 : motor, dt);
+		/* state sequence bookkeeping */
+		if (out.state != prev_state) {
+			if (out.state == BC_ST_CALIBRATING) saw_calib = 1;
+			if (out.state == BC_ST_IDLE) { if (!saw_calib) order_ok = 0; saw_idle = 1; }
+			if (out.state == BC_ST_ARMING) { if (!saw_idle) order_ok = 0; saw_arming = 1; r.arming_s = 0; }
+			if (out.state == BC_ST_BALANCING && t_rel < 0) {
+				if (!saw_arming) order_ok = 0;
+				saw_bal = 1;
+				t_rel = t;	/* "hand release" */
+				pl.theta = c->theta0_deg / RAD2DEG;
+				pl.omega = 0;
+				/* the car was held at this lean: estimator has converged to it */
+				core.est.theta = (float)c->theta0_deg;
+			}
+			prev_state = out.state;
+		}
+		if (out.state == BC_ST_ARMING)
+			r.arming_s += DT;
 
+		if (t_rel < 0) {
+			/* held upright by hand while arming */
+			pl.theta = pl.omega = pl.x = pl.v = pl.u_applied = 0.0;
+			continue;
+		}
+
+		{
+			double drive = out.motor_enable ? 0.5 * (out.out_l + out.out_r) : 0.0;
+
+			if (out.state == BC_ST_FALLEN || out.state == BC_ST_FAULT) {
+				r.fell = 1;
+				if (fault_cycles >= 0 && r.cycles_to_fault < 0)
+					r.cycles_to_fault = fault_cycles;
+				if (fabs(drive) > r.motor_after_fault)
+					r.motor_after_fault = fabs(drive);
+			}
+			if (fault_cycles >= 0)
+				fault_cycles++;
+			plant_step(&pl, drive, DT);
+		}
+
+		total++;
+		n_after++;
 		if (fabs(plant_theta_deg(&pl)) > r.max_theta_deg)
 			r.max_theta_deg = fabs(plant_theta_deg(&pl));
 		if (fabs(pl.x) > r.max_x_m)
 			r.max_x_m = fabs(pl.x);
-		if (t >= c->seconds - 1.0) {
+		if (t - t_rel >= c->seconds - 1.0) {
 			if (fabs(plant_theta_deg(&pl)) > r.tail_theta_deg)
 				r.tail_theta_deg = fabs(plant_theta_deg(&pl));
 			if (fabs(pl.v) > r.tail_speed_mps)
 				r.tail_speed_mps = fabs(pl.v);
 		}
-		if (fabs(pl.theta) > 3.0)
-			break;		/* diverged, stop wasting cycles */
+		if (fabs(pl.theta) > 3.0 && !unplugged) {	/* diverged */
+			r.max_theta_deg = 1e6;
+			break;
+		}
 	}
-	if (fabs(pl.theta) > 3.0)
-		r.max_theta_deg = 1e6;
+	(void)n_after; (void)total;
+	r.released = saw_bal;
+	r.seq_ok = order_ok && saw_calib && saw_idle && saw_arming && saw_bal;
+	r.final_state = out.state;
+	r.final_fault = out.fault;
 	return r;
 }
 
 /* ---- tests ------------------------------------------------------------- */
 
-/* Shipped configuration: src/balance_main.c + mpu60x0.c as of this commit. */
-static sim_cfg_t cfg_shipped(void)
+static void sim_startup_sequence_and_arming_time(void)
 {
 	sim_cfg_t c = cfg_default();
+	sim_res_t r;
 
-	c.angle_kp = 25.0; c.angle_kd = 0.8;
-	c.speed_kp = 0.05; c.speed_ki = 0.01; c.speed_clamp = 15.0;
-	return c;
+	c.seconds = 3.0;
+	r = run_sim(&c);
+	CHECK(r.released);
+	CHECK(r.seq_ok);				/* CALIBRATING->IDLE->ARMING->BALANCING */
+	CHECK_NEAR(r.arming_s, 1.0, 0.05);		/* ST-02: 1 s upright */
+	CHECK(!r.fell);
 }
 
-/* Recommended configuration from docs/balance_car/03 and 04. */
-static sim_cfg_t cfg_recommended(void)
+static void sim_default_params_balance_across_plant_gains(void)
 {
-	sim_cfg_t c = cfg_default();
-
-	c.est_alpha = 0.998; c.est_gate_g = 0.1;
-	c.angle_kp = 15.0; c.angle_kd = 0.8;
-	c.speed_kp = -1.0e-4; c.speed_ki = -1.0e-4; c.speed_clamp = 8.0;
-	c.seconds = 15.0;
-	return c;
-}
-
-static void sim_recommended_balances_across_plant_gains(void)
-{
-	/* 0.4x .. 4x around the assumed motor/chassis gain. */
-	const double kus[] = { 0.02, 0.05, 0.1, 0.2 };
+	const double kus[] = { 0.02, 0.05, 0.1, 0.2 };	/* 0.4x .. 4x assumed gain */
 	size_t i;
 
 	for (i = 0; i < sizeof(kus) / sizeof(kus[0]); i++) {
-		sim_cfg_t c = cfg_recommended();
+		sim_cfg_t c = cfg_default();
 		sim_res_t r;
 
 		c.ku = kus[i];
 		r = run_sim(&c);
+		CHECK(r.released);
 		CHECK(!r.fell);
 		CHECK(r.max_theta_deg < 12.0);
 		CHECK(r.tail_theta_deg < 3.0);
@@ -188,9 +245,9 @@ static void sim_recommended_balances_across_plant_gains(void)
 	}
 }
 
-static void sim_recommended_tolerates_sensor_noise(void)
+static void sim_tolerates_sensor_noise(void)
 {
-	sim_cfg_t c = cfg_recommended();
+	sim_cfg_t c = cfg_default();
 	sim_res_t r;
 
 	c.accel_noise_g = 0.03; c.gyro_noise_dps = 0.5;
@@ -199,9 +256,9 @@ static void sim_recommended_tolerates_sensor_noise(void)
 	CHECK(r.tail_theta_deg < 3.0);
 }
 
-static void sim_recommended_recovers_from_push(void)
+static void sim_recovers_from_push(void)
 {
-	sim_cfg_t c = cfg_recommended();
+	sim_cfg_t c = cfg_default();
 	sim_res_t r;
 
 	c.theta0_deg = 0.0; c.push_at_s = 2.0; c.push_rad_s = 0.6;	/* ~34 dps */
@@ -210,9 +267,9 @@ static void sim_recommended_recovers_from_push(void)
 	CHECK(r.tail_theta_deg < 3.0);
 }
 
-static void sim_recommended_starts_from_larger_lean(void)
+static void sim_starts_from_larger_lean(void)
 {
-	sim_cfg_t c = cfg_recommended();
+	sim_cfg_t c = cfg_default();
 	sim_res_t r;
 
 	c.theta0_deg = 12.0;
@@ -221,96 +278,78 @@ static void sim_recommended_starts_from_larger_lean(void)
 	CHECK(r.tail_theta_deg < 3.0);
 }
 
-/*
- * Guards the sign calibration step (docs/balance_car/04 section 7): with the
- * firmware's angle convention the speed loop needs a NEGATIVE gain. A wrong
- * encoder/motor polarity turns it into positive feedback: the car falls or
- * runs away.
- */
-static void sim_wrong_speed_sign_diverges(void)
-{
-	sim_cfg_t c = cfg_recommended();
-	sim_res_t r;
-
-	c.speed_kp = +5.0e-4; c.speed_ki = +1.0e-4;
-	r = run_sim(&c);
-	/* either it falls, or it runs away instead of holding position */
-	CHECK(r.fell || r.max_x_m > 5.0);
-}
-
-/*
- * KNOWN DEFECTS in the shipped firmware (docs/balance_car/04 and 05).
- * These pin current behaviour so the fix is visible in review: when
- * balance_main.c / mpu60x0.c are updated, invert or delete them.
- *   a) complementary alpha 0.98 trusts the accelerometer, which is
- *      contaminated by the car's own acceleration (positive feedback).
- *   b) speed gains +0.05 / +-15 deg are the wrong sign and ~500x too large
- *      for counts/s units.
- */
-static void sim_KNOWN_DEFECT_shipped_config_falls(void)
-{
-	sim_cfg_t c = cfg_shipped();
-	sim_res_t r = run_sim(&c);
-
-	CHECK(r.fell || r.max_theta_deg > 45.0);
-}
-
-static void sim_KNOWN_DEFECT_shipped_speed_gains_fall_even_with_good_estimator(void)
-{
-	sim_cfg_t c = cfg_recommended();
-	sim_res_t r;
-
-	c.speed_kp = 0.05; c.speed_ki = 0.01; c.speed_clamp = 15.0;
-	r = run_sim(&c);
-	CHECK(r.fell || r.max_theta_deg > 45.0);
-}
-
-/* Flipping only the sign of the shipped gains is not enough: too large. */
-static void sim_speed_gain_magnitude_matters_not_just_sign(void)
-{
-	sim_cfg_t c = cfg_recommended();
-	sim_res_t r;
-
-	c.speed_kp = -0.05; c.speed_ki = -0.01; c.speed_clamp = 15.0;
-	r = run_sim(&c);
-	CHECK(r.fell || r.max_theta_deg > 45.0);
-}
-
-/* Upper stability limit of the speed loop in the model (docs 04 section 3.2). */
 static void sim_speed_loop_stable_up_to_4_deg_per_mps(void)
 {
-	sim_cfg_t c = cfg_recommended();
+	sim_cfg_t c = cfg_default();
 	sim_res_t r;
-	double kcps = 3.9 / 19390.0;	/* 3.9 deg/(m/s) on the reference chassis */
 
-	c.speed_kp = -kcps; c.speed_ki = -kcps;
+	c.p.v_kp = 3.9f; c.p.v_ki = 3.9f;
 	r = run_sim(&c);
 	CHECK(!r.fell);
 	CHECK(r.tail_theta_deg < 3.0);
 	CHECK(r.max_x_m < 1.0);
 }
 
-static void sim_KNOWN_DEFECT_shipped_filter_falls_even_without_speed_loop(void)
+static void sim_speed_gain_magnitude_limit(void)
 {
-	sim_cfg_t c = cfg_shipped();
+	sim_cfg_t c = cfg_default();
 	sim_res_t r;
 
-	c.speed_kp = 0.0; c.speed_ki = 0.0;
+	c.p.v_kp = 40.0f; c.p.v_ki = 40.0f;		/* ~20x too high */
 	r = run_sim(&c);
 	CHECK(r.fell || r.max_theta_deg > 45.0);
 }
 
+/* Guards the sign bring-up (docs/04 section 7): wrong encoder polarity turns
+ * the speed loop into positive feedback. */
+static void sim_wrong_encoder_sign_runs_away_or_falls(void)
+{
+	sim_cfg_t c = cfg_default();
+	sim_res_t r;
+
+	c.p.enc_sign_l = -1; c.p.enc_sign_r = -1;
+	c.p.v_kp = 6.0f; c.p.v_ki = 2.0f;
+	r = run_sim(&c);
+	CHECK(r.fell || r.max_x_m > 5.0 || r.max_theta_deg > 45.0);
+}
+
+/* Design rationale (docs/03 section 3.1): low gyro weight without the accel
+ * gate lets the car's own acceleration corrupt the angle. */
+static void sim_rationale_low_alpha_without_gate_falls(void)
+{
+	sim_cfg_t c = cfg_default();
+	sim_res_t r;
+
+	c.p.est_alpha = 0.98f; c.p.est_gate_g = 0.0f; c.p.est_bias_gain = 0.0f;
+	c.p.a_kp = 25.0f;
+	r = run_sim(&c);
+	CHECK(r.fell || r.max_theta_deg > 45.0);
+}
+
+static void sim_imu_unplug_coasts_within_four_cycles(void)
+{
+	sim_cfg_t c = cfg_default();
+	sim_res_t r;
+
+	c.unplug_at_s = 3.0; c.seconds = 4.0;
+	r = run_sim(&c);
+	CHECK_EQ(r.final_state, BC_ST_FAULT);		/* HIL-06 / S1 */
+	CHECK_EQ(r.final_fault, BC_FAULT_IMU_BUS);
+	CHECK(r.cycles_to_fault >= 0 && r.cycles_to_fault <= 4);
+	CHECK_NEAR(r.motor_after_fault, 0.0, 1e-9);	/* no stale PWM */
+}
+
 void suite_sim(void)
 {
-	printf("suite closed-loop simulation\n");
-	RUN(sim_recommended_balances_across_plant_gains);
-	RUN(sim_recommended_tolerates_sensor_noise);
-	RUN(sim_recommended_recovers_from_push);
-	RUN(sim_recommended_starts_from_larger_lean);
-	RUN(sim_wrong_speed_sign_diverges);
-	RUN(sim_KNOWN_DEFECT_shipped_config_falls);
+	printf("suite closed-loop simulation (real bc_core)\n");
+	RUN(sim_startup_sequence_and_arming_time);
+	RUN(sim_default_params_balance_across_plant_gains);
+	RUN(sim_tolerates_sensor_noise);
+	RUN(sim_recovers_from_push);
+	RUN(sim_starts_from_larger_lean);
 	RUN(sim_speed_loop_stable_up_to_4_deg_per_mps);
-	RUN(sim_speed_gain_magnitude_matters_not_just_sign);
-	RUN(sim_KNOWN_DEFECT_shipped_speed_gains_fall_even_with_good_estimator);
-	RUN(sim_KNOWN_DEFECT_shipped_filter_falls_even_without_speed_loop);
+	RUN(sim_speed_gain_magnitude_limit);
+	RUN(sim_wrong_encoder_sign_runs_away_or_falls);
+	RUN(sim_rationale_low_alpha_without_gate_falls);
+	RUN(sim_imu_unplug_coasts_within_four_cycles);
 }

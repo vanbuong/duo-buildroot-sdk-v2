@@ -93,6 +93,45 @@ static void pid_nonpositive_dt_is_safe(void)
 	CHECK(out == out);
 }
 
+static void pid_rate_form_has_no_setpoint_kick(void)
+{
+	bc_pid_t p;
+	float out;
+
+	pid_init(&p, 0.0f, 0.0f, 1.0f, -1000.0f, 1000.0f);
+	pid_update_rate(&p, 0.0f, 0.0f, 0.0f, 0.005f, 0);
+	out = pid_update_rate(&p, 5.0f, 0.0f, 0.0f, 0.005f, 0);	/* step */
+	CHECK_NEAR(out, 0.0f, 1e-6);				/* CTL-01 */
+	out = pid_update_rate(&p, 0.0f, 0.0f, 10.0f, 0.005f, 0);
+	CHECK_NEAR(out, -10.0f, 1e-5);				/* -kd*rate */
+}
+
+static void pid_rate_form_p_and_clamp(void)
+{
+	bc_pid_t p;
+
+	pid_init(&p, 2.0f, 0.0f, 0.5f, -50.0f, 50.0f);
+	CHECK_NEAR(pid_update_rate(&p, 10.0f, 4.0f, 2.0f, 0.005f, 0), 11.0f, 1e-5);
+	CHECK_NEAR(pid_update_rate(&p, 100.0f, 0.0f, 0.0f, 0.005f, 0), 50.0f, 1e-5);
+}
+
+static void pid_i_limit_is_in_output_units_and_freeze_holds(void)
+{
+	bc_pid_t p;
+	int i;
+
+	pid_init(&p, 0.0f, 2.0f, 0.0f, -100.0f, 100.0f);
+	pid_set_i_limit(&p, 6.0f);			/* term limit 6 -> integral 3 */
+	for (i = 0; i < 100000; i++)
+		pid_update_rate(&p, 1.0f, 0.0f, 0.0f, 0.005f, 0);
+	CHECK_NEAR(p.integral, 3.0f, 1e-4);		/* CTL-03 */
+	CHECK_NEAR(pid_update_rate(&p, 1.0f, 0.0f, 0.0f, 0.005f, 0), 6.0f, 1e-3);
+	pid_reset(&p);
+	for (i = 0; i < 100; i++)
+		pid_update_rate(&p, 1.0f, 0.0f, 0.0f, 0.005f, 1);	/* frozen */
+	CHECK_NEAR(p.integral, 0.0f, 1e-9);
+}
+
 void suite_pid(void)
 {
 	printf("suite pid\n");
@@ -103,4 +142,7 @@ void suite_pid(void)
 	RUN(pid_setpoint_step_causes_derivative_kick);
 	RUN(pid_reset_clears_state);
 	RUN(pid_nonpositive_dt_is_safe);
+	RUN(pid_rate_form_has_no_setpoint_kick);
+	RUN(pid_rate_form_p_and_clamp);
+	RUN(pid_i_limit_is_in_output_units_and_freeze_holds);
 }

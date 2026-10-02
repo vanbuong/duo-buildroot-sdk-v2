@@ -20,4 +20,6 @@ void fake_i2c_set_accel_gyro(int16_t ax, int16_t ay, int16_t az,
 uint8_t fake_i2c_get_reg(uint8_t reg);
 void fake_i2c_fail_reads(int fail);
 int  fake_i2c_write_count(void);
+/* called before every poll_i2c_read(); lets a test change registers over time */
+void fake_i2c_set_read_hook(void (*hook)(void));
 #endif
