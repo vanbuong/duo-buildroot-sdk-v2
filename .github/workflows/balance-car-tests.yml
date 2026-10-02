@@ -1,0 +1,64 @@
+name: balance-car-tests
+
+# Host-side unit tests + closed-loop simulation for the FreeRTOS balance-car
+# firmware logic (freertos/cvitek/task/balance_car). No cross toolchain or SDK
+# download needed; runs in about a minute.
+# Test plan: docs/balance_car/05-test-plan-and-ci.md
+
+on:
+  push:
+    paths:
+      - 'freertos/cvitek/task/balance_car/**'
+      - 'docs/balance_car/**'
+      - '.github/workflows/balance-car-tests.yml'
+  pull_request:
+    paths:
+      - 'freertos/cvitek/task/balance_car/**'
+      - 'docs/balance_car/**'
+      - '.github/workflows/balance-car-tests.yml'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: freertos/cvitek/task/balance_car/test
+
+jobs:
+  unit:
+    name: unit+sim (${{ matrix.cc }}${{ matrix.san == '1' && ', asan+ubsan' || '' }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cc: gcc,   san: '0' }
+          - { cc: gcc,   san: '1' }
+          - { cc: clang, san: '0' }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run
+        run: make test CC=${{ matrix.cc }} SAN=${{ matrix.san == '1' && '1' || '' }}
+
+  coverage:
+    name: line coverage gate
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Coverage (pid, encoder, mpu60x0 >= 85 %)
+        run: make coverage
+      - name: Upload gcov data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: balance-car-gcov
+          path: freertos/cvitek/task/balance_car/test/build/cov/*.gcov
+          if-no-files-found: ignore
+
+  docs:
+    name: docs link check
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 docs/balance_car/check_links.py

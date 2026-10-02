@@ -51,6 +51,16 @@ Copy `cvirtos.elf` to the SD root (or `/lib/firmware/`) as expected by your remo
 
 Starting gains in `balance_main.c` (`ANGLE_KP/KD`, `SPEED_KP/KI`) need chassis-specific tuning. Hold the robot upright during gyro bias calibration at boot.
 
+> **Warning:** in the closed-loop simulation (`test/`) the shipped speed-loop gains/sign and the 0.98
+> complementary filter do **not** balance. Treat them as placeholders and read
+> [`docs/balance_car/04-pid-and-motion-control.md`](../../../../docs/balance_car/04-pid-and-motion-control.md)
+> (recommended gains, sign bring-up) before powering the motors on the floor.
+
+## Design docs and tests
+
+* Design and plan: [`docs/balance_car/`](../../../../docs/balance_car/README.md)
+* Host unit tests + simulation: `make -C test test` (no SDK needed; see `docs/balance_car/05-test-plan-and-ci.md`)
+
 ## MPU address
 
 Default `0x68` (AD0 low). Set `BC_MPU_ADDR` to `BC_MPU_ADDR_AD0_HIGH` (`0x69`) if AD0 is pulled high.
