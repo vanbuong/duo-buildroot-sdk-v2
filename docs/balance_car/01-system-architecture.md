@@ -65,19 +65,26 @@ flowchart LR
 
 | Peripheral | Owner | Linux must… | Source of truth |
 |------------|-------|-------------|-----------------|
-| I2C1 (`PAD_MIPIRX4P/N`) – MPU | C906L | set `&i2c1 { status = "disabled"; }` **[now: DTS has `status = "okay"` – conflict]** | `board_pins.h`, DuoS DTS |
+| I2C for the MPU – **[now]** I2C1 on `PAD_MIPIRX4P/N`; **[plan]** I2C0 on `IIC0_SCL/SDA` | C906L | keep `&i2c0` disabled (already so on DuoS); set `&i2c1` disabled while the IMU is on it **[now: DTS has `okay`]** | `board_pins.h`, DuoS DTS |
+| `VIVO_D0..D8` (encoders, direction, STBY) | C906L | **[now: conflict]** U-Boot (`cvi_board_init.c`) muxes `VIVO_D0/D1` as I2C4 (touch panel) and `VIVO_D5..D8` as SPI3, and the DuoS DTS enables `&i2c4` (gt9xx) and `&spi3`; disable both nodes in the balance image or move the signals | `board_pins.c`, DTS |
 | PWM0 ch1/ch2 (`VIVO_D10/D9`) | C906L | not `insmod cv181x_pwm.ko` **[now: `duo-init.sh` loads it]** or not export those channels | `hw_pwm.c` |
 | XGPIOB 13–21 (`VIVO_D0..D8`) | C906L | never `echo N > /sys/class/gpio/export` for GPIO numbers 461–469 (Linux base 448 + n) | `board_pins.h` |
-| MIPI-RX / CSI, ISP, VENC, DWA, VPSS | Linux | – | `cvi_mpi`, `loadsystemko.sh` |
+| MIPI-RX / CSI (J1 16-pin: lanes 2/0/1, I2C3, MCLK0, reset `XGPIOA_2`; J2 15-pin: lanes 5/3/4, I2C2, MCLK1, reset `XGPIOA_4`), ISP, VENC, DWA, VPSS | Linux | one connector active at a time ([02 §3](02-video-streaming-wifi.md)); the RTOS must not touch I2C2/I2C3, `CAM_MCLK*`, `XGPIOA_2/4` | `cvi_mpi`, `loadsystemko.sh`, `sensor_cfg*.ini` |
 | SDIO Wi-Fi (AIC8800D80), BT UART | Linux | – | `duo-init.sh` |
 | UART used for RTOS console (`printf`) | C906L | not open it as a TTY | `FreeRTOSConfig.h`, uart driver |
 | Mailbox `0x01900000`, spinlocks | shared, protocol-arbitrated | use the `rtos_cmdqu` driver only | `rtos_cmdqu.h` |
 
-> **Open risk R1 (must be resolved on the schematic before anything else):** `PAD_MIPIRX4P/N` are
-> MIPI-RX lane pads whose alternate function is `IIC1_SCL/SDA` (`ramdisk/tools/cvi_pinmux/cv181x/func.h`).
-> If a CSI camera connector on DuoS uses the RX4 pair, the IMU on I2C1 and the camera are mutually
-> exclusive. Fallback: move the IMU to another I2C bus on the 40-pin header (I2C2/I2C3 – pin function
-> must be confirmed in the pinmux table) and change only `BC_MPU_I2C_ID` + `board_pins_init()`.
+> **R1 – resolved by the camera layout (see [02 §3](02-video-streaming-wifi.md)): the IMU must leave
+> `PAD_MIPIRX4P/N`.** The DuoS has two CSI connectors and both must be usable (one at a time). From
+> `device/generic/rootfs_overlay/duos/mnt/data/sensor_cfg_*.ini`: the 16-pin connector (J1, GC2083) uses CSI
+> lane pads 2/0/1, the 15-pin Raspberry-Pi-style connector (J2, OV5647/IMX219) uses lane pads **5/3/4** –
+> and pad 4 is `PAD_MIPIRX4P/N`, the pair the current firmware uses as I2C1. So with the IMU where it is,
+> J2 cannot work. **Decision [plan]:** move the IMU to **I2C0** (`IIC0_SCL/SDA`; the HAL already has
+> `PINMUX_I2C0`, U-Boot parks these pads as `XGPIOA_28/29`, and the DuoS DTS has `&i2c0` disabled, so Linux
+> does not use them). Still to confirm on the schematic: that the I2C0 pads are routed to the 40-pin
+> header on the DuoS, and the clock-gate bits for I2C0 (current code enables the I2C1 gates). I2C2/I2C3 are
+> *not* candidates: they carry the camera sensors (J2 and J1). Code change is limited to `BC_MPU_I2C_ID`,
+> `board_pins_init()` and the clock enables.
 
 ### 2.2 Memory map (DuoS, 512 MiB DDR)
 

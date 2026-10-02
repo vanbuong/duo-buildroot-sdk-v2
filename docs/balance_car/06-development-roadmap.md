@@ -32,7 +32,9 @@ Control/algorithm findings C1–C10 are in [04 §9](04-pid-and-motion-control.md
 | S6 | High | Encoders are polled only between I2C transfers (≈ 0.4 ms blind **[est]**) → edge loss at speed | code + UT-ENC-05 | GPIO-edge ISR or timer-ISR polling (M3) |
 | S7 | High | No communication with Linux: no commands, telemetry, parameters; `g_target_speed/turn` never written | code | `IP_BALANCE` + `bc_shm` + `bcd` (M4) |
 | S8 | High | Linux DTS enables `&i2c1` (the IMU bus) and `duo-init.sh` loads `cv181x_pwm.ko` (the PWM block) → ownership conflict | `sg2000_milkv_duos_*_sd.dts`, `duo-init.sh` | disable in DTS/scripts (M0) |
-| S9 | **Risk** | `PAD_MIPIRX4P/N` are MIPI-RX pads (CSI) – may collide with the camera connector | `ramdisk/tools/cvi_pinmux/cv181x/func.h` | schematic check, fallback I2C bus (M0) |
+| S9 | **High (confirmed)** | `PAD_MIPIRX4P/N` (IMU I2C1) are CSI lane pad 4, used by the 15-pin camera connector J2 (`lane_id = 5,3,4`) | `sensor_cfg_OV5647_J2.ini`, `func.h` | move IMU to I2C0; confirm header pins and clock gates (M0) |
+| S17 | High | Firmware remaps `VIVO_D0..D8` to GPIO but U-Boot muxes them as I2C4 (touch) / SPI3 and the DuoS DTS enables `&i2c4`, `&spi3` | `cvi_board_init.c`, DuoS DTS | disable those nodes in the balance image or relocate signals (M0) |
+| S18 | Med | No IMX219 sensor driver in the SDK (15-pin connector supports OV5647 only) | `cvi_mpi/component/isp/sensor` | optional port (M6) |
 | S10 | Med | Gyro range ±250 °/s clips in a fall/push; MPU6500 accel DLPF register (0x1D) never written; sample clock 200 Hz asynchronous to the loop | `mpu60x0.c` | ±500 °/s, 1 kHz output, 6500 config (M2) |
 | S11 | Med | No sign macros for IMU/motor/encoder – wrong wiring cannot be corrected without code changes | headers | `BC_*_SIGN` + bring-up procedure (M1) |
 | S12 | Low | `hw_pwm_enable()` stops/restarts the channel on every duty update | `hw_pwm.c` | update-in-place with `PWMUPDATE` (M3) |
@@ -49,7 +51,7 @@ Dependencies are strictly top-down unless stated. "Exit tests" refer to IDs in [
 
 | Task | Output |
 |------|--------|
-| Check the DuoS schematic for `MIPIRX4P/N` usage on CSI connectors; decide IMU bus (R1/S9) | decision note; `BC_MPU_I2C_ID` + pinmux if changed |
+| Move the IMU to I2C0 (confirm the pads reach the 40-pin header; find the I2C0 clock gates); resolve the `VIVO_D0..D8` overlap with I2C4/SPI3 (S9, S17) | `BC_MPU_I2C_ID`, `board_pins_init()`, DTS note |
 | Remove Linux ownership: `&i2c1`/chosen bus disabled, no `cv181x_pwm.ko`, GPIO 461–469 untouched (S8) | DTS + `duo-init.sh` patch (balance image variant) |
 | Build `cvirtos.elf`, record `size`, check free heap/stack, link the 64 KiB `bc_shm` window assertion | numbers in doc 01 §2.2 |
 | Hardware: STBY pull-down, e-stop button, power switch, battery sense divider to an ADC pin if available | wiring note |
@@ -123,6 +125,8 @@ Exit: phone drives the car over Wi-Fi; link drop → stands still.
 
 | Task | Output |
 |------|--------|
+| `bc-camera` probe/select for J1 (GC2083, 16-pin) and J2 (OV5647, 15-pin), one active at a time; reset-hold of the unused sensor | VID-05..07 |
+| (optional) IMX219 sensor driver for J2 (S18) | |
 | Camera + `rtsp_server_video` on DuoS, profiles `fpv-low/med/hq`, `bc_video.json` | VID-01, VID-03 |
 | Adaptive bitrate/fps from link statistics | VID-04 |
 | OSD telemetry overlay | |
@@ -187,7 +191,7 @@ can overlap M2–M3 with M5–M6 after M4's interface is agreed and shave ≈ 2 
 
 | ID | Risk | L | I | Mitigation | Trigger / owner |
 |----|------|---|---|------------|-----------------|
-| K1 | `MIPIRX4` pads shared with CSI → IMU/camera conflict | M | H | M0 schematic check; fallback I2C bus | before M0 exit |
+| K1 | IMU on `MIPIRX4` pads blocks the 15-pin camera (**confirmed**); new I2C0 pads may not be on the header | H | H | move IMU to I2C0; check schematic; last resort: IMU on a bit-banged GPIO I2C | before M0 exit |
 | K2 | Plant model is wrong → gains from the sim do not transfer | H | M | treat sim as structure/sign validation; HIL-09 identification; tune on stand first | M7 |
 | K3 | DDR contention from video stretches RTOS timing | M | H | PERF-03 early (M6 starts with it); reduce resolution/fps; keep I2C/PWM code small and in cache | M6 |
 | K4 | RTOS crash leaves motors running | M | **Critical** | S2 mitigations; SAF-08 must pass before untethered tests | M4 |
@@ -219,7 +223,8 @@ can overlap M2–M3 with M5–M6 after M4's interface is agreed and shave ≈ 2 
 
 ## 8. Open questions (need an answer from the hardware owner)
 
-1. Which pads do the DuoS CSI connectors use – is `MIPIRX4P/N` free? (K1)
+1. Are the `IIC0_SCL/SDA` pads routed to the DuoS 40-pin header (new IMU bus)? Which I2C0 clock gate bits apply? (K1)
+   *Answered:* the CSI connectors use lane pads 2/0/1 (16-pin J1) and 5/3/4 (15-pin J2), so `MIPIRX4` is not free if J2 must work.
 2. Exact motor variant (gear ratio, rated voltage), wheel diameter, track width, battery chemistry/cell count.
 3. Is a battery-voltage sense wired to an ADC pin? If not, add a divider.
 4. Is an e-stop button / STBY supervisor acceptable on the chassis?

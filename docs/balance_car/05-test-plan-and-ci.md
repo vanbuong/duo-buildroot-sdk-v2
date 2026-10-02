@@ -172,6 +172,9 @@ USB-serial to the RTOS console and SSH/USB-NCM to Linux.
 | ID | Test | Procedure | Pass criterion |
 |----|------|-----------|----------------|
 | VID-01 | Pipeline soak | `fpv-med` for 30 min | no crash/leak; fps ≥ 24; RSS growth < 5 MB |
+| VID-05 | Camera J1 (GC2083) | forced `j1`, `fpv-med` 10 min; also with IMU running on its (new) bus | stream OK; IMU 0 bus errors; `bc_camera` reports `j1` |
+| VID-06 | Camera J2 (OV5647, 15-pin) | forced `j2`, same | stream OK **and** IMU on I2C0 unaffected (guards the `MIPIRX4` conflict) |
+| VID-07 | Auto-select and switching | each camera alone, both fitted (prefers J1), none fitted; switch J1↔J2 ×10 via `bcctl camera` | correct selection; unused sensor held in reset; balance loop unaffected (`period_us`); no module reload needed (or documented) |
 | VID-02 | Glass-to-glass latency | film a running clock beside the client screen | `fpv-low` ≤ 250 ms median (stretch 150 ms) |
 | VID-03 | Profile switch | switch low↔med↔hq 20× | each < 3 s to first IDR; no pipeline restart of `bcd` |
 | VID-04 | Adaptive rate | `tc netem loss 3 % delay 40 ms jitter 20 ms` | automatic downshift within 5 s; recovery after link restored |

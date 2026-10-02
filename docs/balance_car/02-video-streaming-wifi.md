@@ -54,7 +54,72 @@ Components, all **[now]** unless noted:
 | AP mode | **not in defconfig** – needs `BR2_PACKAGE_HOSTAPD=y` (+ `dnsmasq`, already enabled, for DHCP) **[plan]** | |
 | Diagnostics | `iperf3`, `iw`, `dropbear` (ssh) | defconfig |
 
-## 3. Network topologies
+## 3. Cameras: two CSI connectors, one active at a time
+
+| | **J1 – 16-pin, 1.8 V** (ships with DuoS) | **J2 – 15-pin, Raspberry-Pi compatible** |
+|---|---|---|
+| Sensor | **GC2083** (2 MP, 10-bit, 30 fps) | **OV5647** (supported); IMX219 (**not in the SDK**, see below) |
+| SDK config file | `sensor_cfg_GC2083.ini` (= default `sensor_cfg.ini`), also `sensor_cfg_OV5647_J1.ini` | `sensor_cfg_OV5647_J2.ini` |
+| Sensor I2C | bus 3, address 0x37 (GC2083) / 0x36 (OV5647 on J1) | bus 2, address 0x36 |
+| CSI lane pads (`lane_id` = clk, d0, d1) | 2, 0, 1 | 5, 3, 4 |
+| MCLK / reset pin (U-Boot `cvi_board_init.c`) | `CAM_MCLK0` / `XGPIOA_2` | `CAM_MCLK1` / `XGPIOA_4` (`CAM_PD1`) |
+| `mipi_dev`, `dev_num` | 0, 1 | 0, 1 |
+
+The `lane_id` values come from the shipped `.ini` files; MCLK/reset/I2C from `build/boards/.../u-boot/cvi_board_init.c`.
+Both connectors use different pads, I2C buses and reset lines, so they do not electrically conflict, and
+the pipeline is configured for a single sensor (`dev_num = 1`), which matches "one at a time".
+
+**Interaction with the robot hardware (changes from the earlier draft):**
+
+* J2 uses CSI lane pad 4 = `PAD_MIPIRX4P/N`, the pins the firmware currently uses for the IMU's I2C1. The IMU
+  moves to **I2C0** ([01 §2.1](01-system-architecture.md)). I2C2/I2C3 belong to the cameras and are not available to the RTOS.
+* The RTOS must not configure `CAM_MCLK*`, `XGPIOA_2/4`, I2C2 or I2C3 (note: the HAL has `PINMUX_CAM0/CAM1/I2C3`
+  helpers – never call them from the balance firmware).
+
+### 3.1 Selecting the active camera
+
+Policy: **one sensor configured and running; the other connector's sensor is held in reset** (drive its reset
+line active, no MCLK) so it cannot disturb the bus or the CSI receiver.
+
+| Mode | Behaviour |
+|------|-----------|
+| `auto` (default) | at boot, probe both sensor I2C buses (below); if exactly one answers use it; if both answer use `preferred` (default J1); if none, start without video |
+| `j1` / `j2` | forced selection from `/mnt/data/bc_camera.conf` or `bcctl camera j1|j2` |
+
+Implementation [plan] – `bc-camera` script run from `S97bc-video` **before** the pipeline starts:
+
+```sh
+# 1. probe (sensor held out of reset first; chip-id registers per datasheets – verify on hardware)
+#    GC2083  bus 3 @0x37 : regs 0xF0/0xF1 = 0x20 0x83
+#    OV5647  bus 2 @0x36 : regs 0x300A/0x300B = 0x56 0x47
+#    IMX219  bus 2 @0x10 : regs 0x0000/0x0001 = 0x02 0x19      (only if a driver is added)
+# 2. copy the matching ini over /mnt/data/sensor_cfg.ini
+#      GC2083 -> sensor_cfg_GC2083.ini     OV5647@J2 -> sensor_cfg_OV5647_J2.ini
+# 3. hold the unused sensor in reset via sysfs GPIO (XGPIOA_2 or XGPIOA_4; Linux number = 480 + n **[verify base]**)
+# 4. start bc-video (VI/ISP/VENC/RTSP) with the selected sensor name
+```
+
+Switching camera at run time = stop `bc-video`, rewrite the ini, restart (a few seconds); no kernel module
+reload should be needed since `snsr_i2c.ko`/`cvi_mipi_rx.ko` read the ini at pipeline start **[verify – if
+not, reload those two modules]**. The robot keeps balancing during the switch (video is decoupled).
+
+The unused connector must be empty or its sensor idle; hot-plugging a camera is not supported (reboot or
+`bcctl camera rescan`).
+
+### 3.2 Sensor support status
+
+| Sensor | Status in this SDK | Work |
+|--------|--------------------|------|
+| GC2083 | supported (`cvi_mpi/component/isp/sensor/cv181x/gcore_gc2083`, ISP tuning present) | none |
+| OV5647 | supported (`.../ov_ov5647`), J1 and J2 ini files exist | validate on J2 with the 15-pin cable |
+| **IMX219** | **not present** (no sensor driver, `cmos`/`sensor_ctl`/tuning files) | port: sensor_ctl (I2C register tables for 1080p/720p 2-lane mode), `cmos.c` (AE/AWB/gain tables), `cmos_param.h`, ISP tuning (`cvi_tool` bin), `.ini`, build integration – ≈ 5–10 d **[est]**, optional, after OV5647 works |
+
+Both sensors are 2-lane MIPI here; GC2083 outputs 10-bit RAW at 1920×1080@30, OV5647 at the `2M_30FPS_10BIT`
+mode named in its ini file. Resolution profiles in §5 therefore cap at 1080p. Different sensors have
+different ISP tuning and exposure behaviour: expect to re-check low-light frame rate, because slow shutters
+drop fps and raise video latency.
+
+## 4. Network topologies
 
 | Mode | When | Setup | Pros / cons |
 |------|------|-------|-------------|
@@ -77,10 +142,10 @@ iw dev wlan0 info; iw dev wlan0 link      # confirm band/width/rssi
 The AIC8800D80 band/MIMO/throughput capabilities must be confirmed with `iw phy` on the actual board;
 this document does not assume anything beyond "SDIO, works with the provided `aic8800_fdrv`".
 
-## 4. Video parameters
+## 5. Video parameters
 
 Targets for FPV, not recording. Latency matters more than quality. **[est]** values come from typical
-H.264 behaviour and must be validated by the measurements in §8.
+H.264 behaviour and must be validated by the measurements in §9.
 
 | Profile | Resolution / fps | Codec | Rate control | Bitrate | GOP | Use |
 |---------|------------------|-------|--------------|---------|-----|-----|
@@ -94,11 +159,11 @@ Latency-oriented encoder settings **[plan]**:
 * no B-frames (`VENC_GOPMODE_NORMALP`, as in `rtsp_server_video.cpp`), small GOP, SPS/PPS repeated on
   every IDR;
 * CBR with a short VBV window (≈ 1 frame) to avoid bursts that overflow the Wi-Fi queue;
-* frame rate halved automatically when the Wi-Fi retry rate rises (see §6, adaptive rate);
+* frame rate halved automatically when the Wi-Fi retry rate rises (see §7, adaptive rate);
 * IDR on demand when a client connects or after packet loss (RTSP `PLI`-like behaviour via the
   `CVI_VENC_RequestIDR` call present in `cvi_mpi/sample/venc`).
 
-## 5. Software structure on Linux [plan]
+## 6. Software structure on Linux [plan]
 
 ```
 /usr/bin/bc-video      – wraps cvi_rtsp example: VI→VPSS→VENC→RTSP, reads /mnt/data/bc_video.json
@@ -112,7 +177,7 @@ Latency-oriented encoder settings **[plan]**:
 Start order matters: **RTOS and `bcd` first, video last**, so the robot is controllable even if the
 camera pipeline fails to start (e.g. sensor missing). A failed `bc-video` must never stop `bcd`.
 
-### 5.1 `bcd` – balance control daemon
+### 6.1 `bcd` – balance control daemon
 
 | Responsibility | Mechanism |
 |----------------|-----------|
@@ -128,7 +193,7 @@ Implementation language: C (small, no dependencies, easy to cross-compile with t
 toolchain) or Python 3 (present in the image; adequate at 50 Hz). Start with Python for the protocol
 and UI, move hot paths to C only if CPU measurements demand it.
 
-### 5.2 Client protocol (WebSocket, JSON text frames)
+### 6.2 Client protocol (WebSocket, JSON text frames)
 
 Client → robot (20–50 Hz while a stick is active):
 
@@ -162,14 +227,14 @@ it** (a stalled TCP connection only freezes the commanded velocity, which the de
 into a stop). If measurements show head-of-line blocking under loss, add an optional UDP control
 channel with the same JSON/CBOR payload and sequence numbers (drop old, never retransmit).
 
-### 5.3 Telemetry overlay on video (optional)
+### 6.3 Telemetry overlay on video (optional)
 
 Draw pitch, speed, state, battery and RSSI into the stream with the RGN OSD (same mechanism as
 `isp_info_osd.cpp`) so a recorded video is self-explanatory. Cost: negligible CPU, one text region
 update at ≤ 5 Hz. Do not overlay anything the operator needs for safety – the web UI shows it
 independently of the video.
 
-## 6. Handling a bad link
+## 7. Handling a bad link
 
 | Condition | Detection | Response |
 |-----------|-----------|----------|
@@ -180,7 +245,7 @@ independently of the video.
 | High retry/loss | `iw dev wlan0 station dump` retry %, RTCP loss | adaptive: halve fps, then drop to `fpv-low`; recover after 10 s of clean link |
 | A53 overloaded | `bcd` measures loop lateness | reduce telemetry rate; never touches RTOS timing |
 
-## 7. Performance budgets **[est]**
+## 8. Performance budgets **[est]**
 
 | Metric | Target | How measured |
 |--------|--------|--------------|
@@ -191,24 +256,28 @@ independently of the video.
 | Sustained video+telemetry throughput | video bitrate + < 100 kb/s telemetry | `iperf3`, `iw station dump` |
 | A53 CPU load for `bc-video` + `bcd` | < 60 % of one core | `top`, `/proc/stat` |
 
-## 8. Implementation tasks
+## 9. Implementation tasks
 
 | ID | Task | Depends on | Done when |
 |----|------|------------|-----------|
-| V1 | Bring up camera + `rtsp_server_video` on DuoS with `fpv-med`; verify with `ffplay rtsp://…` | sensor connected | stable 10 min, fps and bitrate logged |
+| V0 | `bc-camera` probe/select script, reset-hold of the unused sensor, J1 (GC2083) and J2 (OV5647) validated separately, switching test | IMU moved off `MIPIRX4` |
+| V1 | Bring up camera + `rtsp_server_video` on DuoS with `fpv-med`; verify with `ffplay rtsp://…` | V0 | stable 10 min, fps and bitrate logged |
 | V2 | Validate Wi-Fi: STA connect script, `iw` power-save off, `iperf3` baseline TCP/UDP both directions | V1 optional | throughput and loss numbers recorded in `docs/balance_car/results/` |
 | V3 | Add `hostapd` to defconfig; AP bring-up script; STA→AP fallback | V2 | phone connects to robot AP, DHCP works |
 | V4 | Profile loader (`bc_video.json`) + adaptive rate | V1 | `fpv-low/med/hq` switchable at run time |
 | V5 | `bcd` skeleton: WebSocket, dead-man, telemetry from stub shm | – | works against a fake RTOS (host test, see doc 05) |
 | V6 | Web UI (single HTML page served by `bcd`): joystick, gauges, video via MJPEG `<img>` first; WebRTC gateway later | V5 | phone browser can drive and see telemetry |
+| V9 | (optional) IMX219 sensor driver + tuning for J2 | V0 |
 | V7 | OSD overlay | V1 | pitch/state visible in stream |
 | V8 | Jitter test with all of the above running | RTOS shm telemetry | `PERF-03` passes |
 
-## 9. Risks
+## 10. Risks
 
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
-| Camera and IMU share `PAD_MIPIRX4` pads (R1 in doc 01) | No video or no IMU | Resolve from schematic first; fallback I2C bus |
+| Camera J2 (15-pin) and the current IMU pads share `PAD_MIPIRX4P/N` (R1, doc 01) | J2 unusable or no IMU | Move IMU to I2C0 (confirm header pins + clock gates); until then only J1 works |
+| IMX219 has no driver in the SDK | 15-pin connector limited to OV5647 | optional sensor port (§3.2) |
+| Wrong sensor ini for the connected camera | pipeline fails to start | `auto` probe before start; `bcd` reports camera state |
 | `cv181x_pwm.ko` loaded by `duo-init.sh` also drives PWM0 | Motor glitches/conflict | Remove `insmod` or keep the channels unexported; verify with `/sys/class/pwm` |
 | DDR contention from VENC/VPSS stretches I2C/PWM timing on the C906L | Control jitter | Measure (`PERF-03`); if needed lower resolution/fps, or move critical code to SRAM if available |
 | Wi-Fi driver is out-of-tree (AIC8800) | Kernel upgrade pain | Pin kernel 5.10; keep modules in `osdrv/extdrv/wireless` |

@@ -40,11 +40,11 @@ flowchart TB
 
 | Item | Value | Where |
 |------|-------|-------|
-| Bus | I2C1, `PAD_MIPIRX4P` = SCL, `PAD_MIPIRX4N` = SDA (**see risk R1 in doc 01**) | `board_pins.h`, `board_pins_init()` |
+| Bus | **[now]** I2C1 on `PAD_MIPIRX4P` (SCL) / `PAD_MIPIRX4N` (SDA) – **collides with CSI lane pad 4 used by the 15-pin camera connector J2**; **[plan]** move to I2C0 (`IIC0_SCL/SDA`), see doc 01 §2.1 | `board_pins.h`, `board_pins_init()` |
 | Address | `0x68` (AD0 low), `0x69` if AD0 high | `BC_MPU_ADDR` |
 | Pull-ups | 2.2–4.7 kΩ to 3.3 V on SDA/SCL (breakout boards usually include them – check for 5 V-pulled modules!) | hardware |
 | Speed | DesignWare I2C master in **polled** mode, fast mode (`IC_CON_SPEED_FS`) ≈ 400 kHz | `poll_i2c.c` |
-| Clocks | `clk_apb_i2c` (EN_1 bit 6), `clk_i2c` (EN_3 bit 7), `clk_apb_i2c1` (EN_3 bit 18) enabled in `board_pins_init()` | `board_pins.c` |
+| Clocks | **[now]** `clk_apb_i2c` (EN_1 bit 6), `clk_i2c` (EN_3 bit 7), `clk_apb_i2c1` (EN_3 bit 18) for I2C1; for I2C0 the matching `clk_apb_i2c0` gate must be looked up and enabled **[verify]** | `board_pins.c` |
 | Level | DuoS GPIO/I2C is **3.3 V only** | datasheet |
 
 Transaction cost of the 14-byte burst: start + addr/W + reg + repeated start + addr/R + 14 data bytes ≈

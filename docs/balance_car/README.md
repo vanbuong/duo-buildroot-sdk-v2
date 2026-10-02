@@ -40,8 +40,11 @@ Rule: **the robot must stay upright with Linux hung or Wi-Fi gone.** Linux only 
 3. **Real-time structure:** busy-wait control loop on the 200 Hz tick, `printf` in the loop, and encoder polling
    that is blind during the 0.4 ms I2C read. Target: timer-driven task, edge-interrupt encoders, console task.
 4. **Resource conflicts:** the Linux DTS enables I2C1 and `duo-init.sh` loads the PWM module – both used by the
-   RTOS; and the IMU pads (`PAD_MIPIRX4P/N`) are MIPI-RX pads that may collide with the camera connector.
-5. **No Linux↔RTOS interface exists yet.** Design: new `IP_BALANCE` mailbox id for 32-bit commands + a 64 KiB
+   RTOS. The IMU pads (`PAD_MIPIRX4P/N`) are CSI lane pad 4, used by the 15-pin camera connector, so the IMU
+   moves to I2C0. `VIVO_D0..D8` overlap with Linux I2C4 (touch) / SPI3.
+5. **Two cameras, one at a time:** J1 16-pin GC2083 (I2C3, MCLK0) and J2 15-pin OV5647 (I2C2, MCLK1); boot-time
+   probe/select, unused sensor held in reset. IMX219 has no driver in the SDK (optional port).
+6. **No Linux↔RTOS interface exists yet.** Design: new `IP_BALANCE` mailbox id for 32-bit commands + a 64 KiB
    shared-memory window with seqlock telemetry ring, double-buffered parameters and heartbeats.
 
 ## What this branch contains
