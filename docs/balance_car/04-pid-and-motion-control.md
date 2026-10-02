@@ -3,15 +3,15 @@
 How the car stays upright, how speed and turning are commanded, how the controller is tuned, and what
 in the shipped firmware has to change.
 
-Legend: **[now]** in `freertos/cvitek/task/balance_car`, **[plan]** proposed, **[sim]** reproduced in the
+Legend: **[now]** implemented in `freertos/cvitek/task/balance_car`, **[plan]** not implemented, **[sim]** reproduced in the
 host simulation (`test/`, doc 05), **[est]** assumption to verify on hardware.
 
-> **Read this first.** A closed-loop simulation of the shipped firmware logic (real `pid.c` and
-> `mpu60x0.c` driven against a wheeled-inverted-pendulum plant) found that the **shipped speed-loop
-> gains/sign and the 0.98 complementary filter do not balance in simulation** (§9, test
-> `sim_KNOWN_DEFECT_*`). The recommended parameters in this document do. The plant is a model with
-> *assumed* parameters; the verdict must be confirmed on the real chassis, but the structural problems
-> (sign, units, accel contamination) do not depend on the exact numbers.
+> **Status.** The control design below is **implemented** (`estimator.c`, `control.c`, `bc_state.c`, `bc_core.c`,
+> wired up in `balance_main.c`) and covered by 107 host tests, including a closed-loop simulation that runs the
+> real code against a wheeled-inverted-pendulum plant. The simulation also showed that the *first* firmware version
+> (speed-loop gain `+0.05` in counts/s, 0.98 complementary filter, no gate) could not balance; those defects (C1–C10,
+> §9) are fixed. The plant is a model with **assumed** parameters, so margins must be confirmed on the real chassis
+> (§12, tests `HIL-09`, `FLD-01`); nothing has run on hardware yet.
 
 ---
 
@@ -40,8 +40,8 @@ flowchart LR
   *lean angle* (a leaning inverted pendulum accelerates toward its lean).
 * **Turn loop** is independent: a differential command around the common drive.
 
-**[now]**: angle PID (`Kp 25, Ki 0, Kd 0.8`) fed by speed PID (`Kp 0.05, Ki 0.01`, output clamp ±15°);
-`g_target_turn` is added/subtracted but nothing ever sets it; no yaw feedback; no command interface.
+**[now]**: all three loops, the mixer and the command path exist. The first firmware version had an angle PID
+(`Kp 25`) fed by a speed PID (`Kp +0.05` per count/s, clamp ±15°), no yaw feedback and no command interface.
 
 ## 2. Physics (why the numbers are what they are)
 
@@ -86,7 +86,7 @@ Consequences:
 
 All quantities per control cycle `k`, `dt` measured (not assumed). Signs per §7.
 
-### 3.1 Angle loop (inner) [plan]
+### 3.1 Angle loop (inner) [now – `bc_ctrl_step`, `pid_update_rate`]
 
 ```
 θ_set = trim_deg + θ_cmd                       (θ_cmd from the speed loop)
@@ -106,7 +106,7 @@ Why derivative on the gyro rate instead of differentiating the error:
 `pid.c` keeps its generic `pid_update(sp, meas, dt)` for the speed/turn loops; add
 `pid_update_dterm(pid, sp, meas, rate, dt)` (derivative from the externally supplied rate) for the angle loop.
 
-### 3.2 Speed loop (outer) [plan]
+### 3.2 Speed loop (outer) [now]
 
 ```
 v_err   = v_t − v_f                              (m/s, v_f = low-passed wheel speed, §03 4.4)
@@ -117,7 +117,7 @@ v_err   = v_t − v_f                              (m/s, v_f = low-passed wheel 
 Equivalently in the firmware's `pid_update(setpoint = v_t, measurement = v)` form the gains are
 **negative** under the sign convention in §7.
 
-Units. The shipped code feeds the loop with **counts/s** and uses `Kp = +0.05`; with the 19 390 counts/m of
+Units. The first version fed the loop with **counts/s** and used `Kp = +0.05`; with the 19 390 counts/m of
 the reference chassis that is `0.05 × 19 390 ≈ 970 °/(m/s)` – five hundred times larger than useful – and
 the output clamp of ±15° is reached at 0.015 m/s of speed error. Convert to m/s first:
 
@@ -136,7 +136,7 @@ in the simulation the speed loop is stable at 5.8 °/(m/s) and diverges at 7.8 *
 
 The speed loop may run at 50 Hz (every 4th cycle); at 200 Hz it is fine too.
 
-### 3.3 Turn loop [plan]
+### 3.3 Turn loop [now]
 
 ```
 w_err = w_t − ω_z                       (ω_z from gyro Z, bias-corrected; rad/s)
@@ -223,7 +223,7 @@ rules:
 * Saturation for longer than `sat_ms` (300 ms) → fault (the loop is not coping: mis-tuned, wrong sign, or dead battery).
 * Heartbeat loss does **not** disarm (it would drop the car); it zeroes the targets.
 
-## 6. Reference implementation sketch [plan]
+## 6. Control-cycle sketch (the real code is `bc_core_step()` + `balance_ctrl_task()`)
 
 ```c
 void bc_ctrl_step(bc_ctx_t *c)
@@ -258,27 +258,26 @@ All functions except `imu_read`, `motors_apply` and the timer are pure and run o
 The control law requires: **positive angle ⇒ output negative ⇒ the wheels move toward the side the car is
 leaning**. Three independent signs decide whether that holds and each can be wrong:
 
-| Macro **[plan]** | What it flips | Symptom if wrong |
+| Parameter [now] (default in `board_pins.h` as `BC_BOARD_*_SIGN`, run-time via `bcctl set`) | What it flips | Symptom if wrong |
 |------------------|---------------|------------------|
-| `BC_IMU_SIGN` / axis map | sign of θ and ω together | car drives away from the lean and falls instantly |
-| `BC_MOTOR_SIGN_L/R` | motor direction (wiring order of OUT1/OUT2) | one wheel pushes the wrong way → spins in circles / falls sideways |
-| `BC_ENC_SIGN_L/R` | encoder count direction | balances for a moment, then the speed loop adds positive feedback and the car runs away (this is what `sim_wrong_speed_sign_diverges` demonstrates: runs away > 5 m or falls) |
+| `imu_sign` | sign of θ and ω together | car drives away from the lean and falls instantly |
+| `motor_sign_l/r` | motor direction (wiring order of OUT1/OUT2) | one wheel pushes the wrong way → spins in circles / falls sideways |
+| `enc_sign_l/r` | encoder count direction | balances for a moment, then the speed loop adds positive feedback and the car runs away (this is what `sim_wrong_encoder_sign_runs_away_or_falls` demonstrates: runs away > 5 m or falls) |
 
 Bench procedure (wheels off the ground, battery connected, car held):
 
 1. **Encoders:** disarmed, spin each wheel by hand in the direction you consider *forward*. Both
-   `enc_*` increase. If not, flip `BC_ENC_SIGN_*`.
+   `enc_*` increase. If not, flip `enc_sign_l/r`.
 2. **Motors:** command `+20 %` per side from the debug shell. Each wheel turns *forward* **and** its
-   encoder counts up. If the wheel turns backward flip `BC_MOTOR_SIGN_*` (or swap OUT1/OUT2).
+   encoder counts up. If the wheel turns backward flip `motor_sign_l/r` (or swap OUT1/OUT2).
 3. **IMU:** `ARM` with the car held upright, then **tilt it slowly forward by hand**: wheels must spin forward
-   (toward the lean) with increasing speed; tilt back → wheels spin backward. If reversed flip `BC_IMU_SIGN`.
+   (toward the lean) with increasing speed; tilt back → wheels spin backward. If reversed flip `imu_sign`.
 4. **Speed loop:** hold the car upright and spin one wheel forward by hand while balancing is active; the
    controller must respond by trying to lean *back* (wheels first accelerate forward, then reverse). With
    the car hand-held you feel a pull *opposing* the motion. If it pulls *along* with it, the speed-loop
-   sign (or `BC_ENC_SIGN`) is wrong.
+   sign (or `enc_sign_*`) is wrong.
 
-Record the final signs in `board_pins.h` and in `results/signs-<chassis>.md` (see doc 06 for artefact
-conventions).
+Record the final signs in `board_pins.h` (`BC_BOARD_*_SIGN`) and persist them with `bcctl save`.
 
 ## 8. Tuning procedure
 
@@ -311,22 +310,22 @@ Troubleshooting:
 | Spins in circles | one motor sign wrong, or `ω_z` bias | §7, recalibrate gyro Z |
 | Runs away after a minute | gyro bias drift, speed-loop sign | enable bias tracking, §7 step 4 |
 
-## 9. Findings on the shipped firmware (with simulation evidence)
+## 9. Findings on the first firmware version and their resolution
 
-| ID | Finding | Evidence | Fix |
-|----|---------|----------|-----|
-| C1 | Speed loop gain `+0.05` in °/(counts/s) is the **wrong sign and ≈ 500× too large** for the angle convention required in §7; output clamp ±15° is reached at 0.015 m/s error | `sim_KNOWN_DEFECT_shipped_config_falls` (whole shipped config falls by ≈ 0.35 s), `sim_KNOWN_DEFECT_shipped_speed_gains_fall_even_with_good_estimator` (wrong sign), `sim_speed_gain_magnitude_matters_not_just_sign` (right sign, same magnitude still diverges) | §3.2 gains, units in m/s |
-| C2 | Complementary filter `α = 0.98` trusts accelerometer contaminated by wheel acceleration | `sim_KNOWN_DEFECT_shipped_filter_falls_even_without_speed_loop` (speed loop disabled, still falls) | §03 3.2 |
-| C3 | Angle `Kp = 25` saturates the 90 % output at 3.6° error | arithmetic | `Kp ≈ 15` with the improved filter; verify on chassis |
-| C4 | `dt` assumed 5 ms | code | measured `dt` |
-| C5 | Derivative on error → kick on setpoint changes | `pid_setpoint_step_causes_derivative_kick` | derivative on gyro rate |
-| C6 | I-term limit equals output limit | `pid_integral_accumulates_and_is_clamped` | separate `i_max`, freeze when saturated |
-| C7 | No turn control, no command path (`g_target_*` are never written) | code | §3.3, doc 01 §6 |
-| C8 | IMU read failure leaves PWM at last value | code (`continue`) | coast on any IMU fault (doc 03 §6) |
-| C9 | Boot arms immediately; filter starts at θ = 0 | code | `IDLE` + arm check; init θ from accel |
-| C10 | No deadband compensation (6–10 % dead zone is typical for N20/37-520 geared motors) | sim shows limit cycle ±1–2° | §3.4 |
+| ID | Finding (first version) | Evidence | Resolution |
+|----|-------------------------|----------|------------|
+| C1 | Speed-loop gain `+0.05` in °/(counts/s): **wrong sign and ≈ 500× too large**; clamp ±15° reached at 0.015 m/s error | simulation: whole configuration fell by ≈ 0.35 s | **fixed**: speed in m/s, `v_kp`/`v_ki` = 1.94 (magnitudes, the loop applies the sign); `sim_default_params_*`, `sim_speed_gain_magnitude_limit`, `sim_wrong_encoder_sign_*` |
+| C2 | Complementary filter `α = 0.98` trusts an accelerometer contaminated by wheel acceleration | simulation, speed loop disabled, still fell | **fixed**: α 0.998 + accel-norm gate + bias tracking (`estimator.c`); counter-example kept as `sim_rationale_low_alpha_without_gate_falls` |
+| C3 | Angle `Kp = 25` saturates the 90 % output at 3.6° error | arithmetic | **fixed**: `a_kp` default 15 (range 3.5…60) |
+| C4 | `dt` assumed 5 ms | code | **fixed**: measured from `rdtime`, clamped 2…10 ms |
+| C5 | Derivative on error → kick on setpoint changes | `pid_setpoint_step_causes_derivative_kick` (kept: it documents `pid_update`) | **fixed** for the angle loop: `pid_update_rate` uses the gyro rate; `pid_rate_form_has_no_setpoint_kick` |
+| C6 | I-term limit equal to the output limit | `pid_integral_accumulates_and_is_clamped` | **fixed**: `pid_set_i_limit` (term units) + freeze flag; `pid_i_limit_is_in_output_units_and_freeze_holds` |
+| C7 | No turn control, no command path | code | **fixed**: turn PI on gyro-Z, mailbox/shm interface, `bcd` |
+| C8 | IMU read failure left the PWM at its last value | code | **fixed**: health monitor + state machine, `sim_imu_unplug_coasts_within_four_cycles` |
+| C9 | Boot armed immediately; filter started at θ = 0 | code | **fixed**: boot → `IDLE`, `ARM` + 1 s upright check, estimator initialised from the accelerometer |
+| C10 | No deadband compensation | simulation: limit cycle ±1–2° | **fixed**: `bc_deadband_comp` (`deadband_pct`, default 6 — to be measured, HIL-09) |
 
-## 10. Parameter reference (defaults = simulation-derived starting point)
+## 10. Parameter reference (defaults = simulation-derived starting point; the authoritative list with ranges is the X-macro in `include/bc_params.h`, mirrored in doc 01 §6.4)
 
 | Name | Unit | Default | Range | Tune order |
 |------|------|---------|-------|------------|
@@ -349,11 +348,11 @@ Troubleshooting:
 
 | What | Where |
 |------|-------|
-| PID mathematics (P, clamp, I and anti-windup, D, reset, dt safety) | `test_pid.c` (7 tests) |
-| Closed loop: recommended configuration balances for plant gains 0.02–0.2 m/s²/%, tolerates sensor noise, recovers from a 34 °/s push, starts from 12° lean | `test_sim.c` |
-| Wrong speed-loop sign diverges (guards §7); gain magnitude limit; stable up to 3.9 °/(m/s) | `sim_wrong_speed_sign_diverges`, `sim_speed_gain_magnitude_matters_not_just_sign`, `sim_speed_loop_stable_up_to_4_deg_per_mps` |
-| Shipped configuration falls (pins the defect until fixed) | `sim_KNOWN_DEFECT_*` |
-| Hardware | `HIL-*`, `FLD-*` in doc 05 |
+| PID mathematics (P, clamp, I and anti-windup, D, rate form, reset, dt safety) | `test_pid.c` (10 tests) |
+| Controller: sign convention, trim, saturation, speed loop leans back when moving forward, encoder sign, slew, turn, mixer priority, deadband | `test_control.c` (13 tests) |
+| State machine: every transition, fall, lift, saturation, IMU faults, ESTOP latch | `test_state.c` (21 tests) |
+| Closed loop (real `bc_core`): balances for plant gains 0.02–0.2 m/s²/%, tolerates noise, recovers from a 34 °/s push, starts from 12° lean, arming flow, speed-gain limits, wrong encoder sign diverges, IMU unplug | `test_sim.c` (10 tests) |
+| Hardware | `HIL-*`, `FLD-*` in doc 05 (not run) |
 
 Simulation plant: 0.10 m CoM height, `b = 0.05`, 6 % deadband, 20 ms actuator lag, 200 Hz loop, accelerometer
 includes the wheel acceleration, optional uniform noise; code in `test/sim_plant.c`. **These are assumed

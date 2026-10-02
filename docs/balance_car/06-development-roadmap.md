@@ -8,21 +8,33 @@ who knows the SDK; widen by 1.5× for someone new to it).
 
 ---
 
-## 1. Current state in one paragraph
+## 0. Implementation status (read this first)
 
-The little core already runs a complete first version of a balance firmware: MPU6050/6500 over a polled
-I2C driver, TB6612FNG with 20 kHz hardware PWM, two polled quadrature encoders and a cascaded PID, started
-from `main_cvirtos()` next to the existing mailbox task. There is **no Linux-facing interface** (no
-commands, no telemetry), **no safety state machine** beyond a 45° fall latch, and the control constants and
-estimator do not balance in simulation. Video/Wi-Fi support exists in the SDK image but is not integrated
-with the robot. This branch adds the design (docs 01–06), a host unit/simulation test harness (30 tests) and a
-CI workflow; it deliberately does **not** change firmware behaviour.
+| Milestone | Status | Notes |
+|-----------|--------|-------|
+| M0 Hardware/ownership validation | **partly done** | software side done: IMU on I2C0 (`BC_MPU_I2C_ID`), Linux PWM module not loaded, `&i2c4`/`&spi3` disabled, image size measured (99 KB text, headroom 1.2 MiB before the shm window). **Hardware items open:** IIC0 pad routing, STBY pull-down, e-stop, battery sense, HIL-01/03/04 |
+| M1 Safety/correctness fixes | **done** | S1, S3, S5, S11, S13, C1–C3 fixed (sign/units/gains, boot to IDLE, coast + STBY off outside BALANCING, printf out of the loop) |
+| M2 Estimator + controller as pure modules | **done** | gated filter + bias tracking, derivative-on-rate, speed PI in m/s, turn PI, slew, mixer, state machine, health monitor; Kalman not implemented; 107 host tests |
+| M3 Real-time structure | **mostly done** | blocking task, measured dt, timing statistics, console task, IRQ encoders (`BC_ENC_USE_IRQ`), IMU burst. **Not done:** HW-timer pacing (tick-paced), PWM update-in-place (S12), CPU-load measurement; IRQ path unverified on hardware |
+| M4 Linux↔RTOS interface | **done** | `IP_BALANCE` (both headers), `bc_shm` window + linker assert, seqlock rings, parameter block/echo, heartbeat watchdog, Linux emergency STBY clear, `bcd`/`bcctl`; RTOS→Linux mailbox events deliberately off (shm ring instead) |
+| M5 Wi-Fi teleoperation | **done in software** | `bc-net.sh` (STA, AP fallback if hostapd present), WebSocket server, web UI, dead-man; **not run**, `hostapd` not added to defconfigs |
+| M6 Video | **partly done** | camera select (`bc_camera.py`), `bc-video.sh`; **not done:** profiles, adaptive rate, OSD, jitter test, IMX219 driver; RTSP binary/args unverified |
+| M7 Identification, tuning, field validation | **not done** | needs the robot |
+| M8 CI maturation | **mostly done** | `unit`, `coverage`, `pytest`, layout drift, **real RTOS image builds**, DTS; open: `fw-size`, static analysis, HIL nightly, release gate |
 
-## 2. Findings on the current implementation
+Verification status of everything marked done: compiled/tested in CI as described in [05 §8](05-test-plan-and-ci.md); **no
+code has run on a DuoS board**.
+
+## 1. State before this work (kept for context)
+
+The first firmware version ran a polled-I2C IMU, TB6612 with HW PWM, polled encoders and a cascaded PID from `main_cvirtos()`,
+with no Linux interface, no safety state machine beyond a 45° latch, and constants that did not balance in simulation.
+
+## 2. Findings on the first version and their status
 
 Control/algorithm findings C1–C10 are in [04 §9](04-pid-and-motion-control.md). System and software findings:
 
-| ID | Sev | Finding | Evidence | Planned fix (milestone) |
+| ID | Sev | Finding | Evidence | Resolution |
 |----|-----|---------|----------|--------------------------|
 | S1 | **High** | IMU read failure executes `continue` before the motor update → motors keep the **last PWM** with a stale angle | `balance_main.c` loop | coast on any IMU fault, 3-strikes policy (M1) |
 | S2 | **High** | If the RTOS crashes/stops, PWM and GPIO latches keep their last state | design review; verify with SAF-08 | Linux emergency STBY clear + hardware watchdog on STBY (M4, hw) |
@@ -42,6 +54,10 @@ Control/algorithm findings C1–C10 are in [04 §9](04-pid-and-motion-control.md
 | S14 | Low | No watchdog, no stack/CPU monitoring, no timing statistics | code | idle hook + telemetry fields (M3) |
 | S15 | Low | Gains/limits are `#define`s | `balance_main.c` | parameter block pushed from Linux (M4) |
 | S16 | Info | The firmware has never been run against a model before this branch; plant values are assumed | doc 04 §11 | system identification (M7) |
+
+**Status of the findings:** fixed in software – S1, S3, S4, S5, S6 (IRQ path unverified on hardware), S7, S8, S9 (IMU moved to I2C0, pad
+routing to confirm), S10, S11, S13, S15, S17; mitigated in software, needs a hardware supervisor for full cover – S2; partly done –
+S14 (stack/timing telemetry yes, CPU load/watchdog no); open – S12 (PWM restart quirk), S16 (system identification), S18 (IMX219).
 
 ## 3. Milestones
 
@@ -235,12 +251,16 @@ can overlap M2–M3 with M5–M6 after M4's interface is agreed and shave ≈ 2 
 
 ## 9. Deliverables of this branch
 
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `docs/balance_car/README.md` … `06-…` | this document set |
-| `docs/balance_car/check_links.py` | doc link checker (CI) |
-| `freertos/cvitek/task/balance_car/test/**` | host unit tests, fakes, simulation (30 tests) |
-| `.github/workflows/balance-car-tests.yml` | CI for the above |
-| `freertos/cvitek/task/balance_car/README.md` | pointer and gain warning |
-
-No production firmware source file was modified.
+| `docs/balance_car/` | design + status documents 01–06, `check_links.py` |
+| `freertos/cvitek/task/balance_car/src, include` | RTOS application: pure core (`bc_params`, `estimator`, `control`, `bc_state`, `imu_health`, `bc_cmd`, `bc_core`, `bc_shm.h`, `bc_proto.h`), drivers/glue (`mpu60x0`, `encoder`, `enc_irq`, `tb6612`, `hw_pwm`, `board_pins`), tasks (`balance_main.c`, `balance_comm.c`) |
+| `freertos/cvitek/task/comm/`, `driver/rtos_cmdqu/`, `osdrv/interdrv/rtos_cmdqu/` | `IP_BALANCE` routing |
+| `freertos/cvitek/scripts/cv181x_lscript.ld`, `kernel/include/riscv64/FreeRTOSConfig.h` | shm window assertion, stack watermark API |
+| `freertos/cvitek/task/CMakeLists.txt`, `task/main/CMakeLists.txt` | balance firmware only for `cv181x` |
+| `freertos/cvitek/task/balance_car/test/` | 107 host tests, fakes, simulation, helper tools |
+| `freertos/cvitek/task/balance_car/linux_tests/`, `tools/` | 57 Python tests; layout generator, RTOS build check, DTS check |
+| `device/generic/rootfs_overlay/duos/mnt/system/bc/` | `bcd`, `bcctl`, `bc_shm`, `bc_camera`, scripts, web UI, generated layout |
+| `device/generic/rootfs_overlay/duos/mnt/system/duo-init.sh` | starts the services, no Linux PWM module |
+| `build/boards/cv181x/*duos*/dts_*/*.dts` | `&i2c4`, `&spi3` disabled |
+| `.github/workflows/balance-car-tests.yml` | CI |

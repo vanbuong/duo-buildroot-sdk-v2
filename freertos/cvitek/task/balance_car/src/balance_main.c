@@ -307,6 +307,9 @@ static void balance_ctrl_task(void *arg)
 				bc_core_step(&g_core, &ci, &co);
 				bc_event_push(shm, bc_now_us(), BC_EVT_LOG_CALIB, (uint16_t)cal, r);
 				bc_rt_send_evt(BC_EVT_CALIB_DONE, (uint32_t)r);
+				/* calibration may have blocked for ~1 s: restart the cadence
+				 * instead of letting vTaskDelayUntil run ~200 catch-up cycles */
+				last = xTaskGetTickCount();
 				t_prev = bc_now_us();
 			}
 		}

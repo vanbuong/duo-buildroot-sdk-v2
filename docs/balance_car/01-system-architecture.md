@@ -6,8 +6,10 @@ cores talk to each other.
 
 Conventions used in this document set:
 
-* **[now]** – behaviour that exists in the tree today (`freertos/cvitek/task/balance_car`).
-* **[plan]** – proposed design, not implemented yet.
+* **[now]** – implemented in this branch. The firmware cross-compiles (CI `fw-build`), the pure logic is
+  host-tested, the Linux side is tested against the real C shared-memory code. **Nothing has run on a DuoS
+  board yet** – see [06 §0](06-development-roadmap.md) for the verified / unverified split.
+* **[plan]** – proposed, not implemented (usually needs hardware or a decision).
 * **[est]** – an estimate or assumption that must be measured on hardware (see
   [05-test-plan-and-ci.md](05-test-plan-and-ci.md)).
 
@@ -65,9 +67,9 @@ flowchart LR
 
 | Peripheral | Owner | Linux must… | Source of truth |
 |------------|-------|-------------|-----------------|
-| I2C for the MPU – **[now]** I2C1 on `PAD_MIPIRX4P/N`; **[plan]** I2C0 on `IIC0_SCL/SDA` | C906L | keep `&i2c0` disabled (already so on DuoS); set `&i2c1` disabled while the IMU is on it **[now: DTS has `okay`]** | `board_pins.h`, DuoS DTS |
-| `VIVO_D0..D8` (encoders, direction, STBY) | C906L | **[now: conflict]** U-Boot (`cvi_board_init.c`) muxes `VIVO_D0/D1` as I2C4 (touch panel) and `VIVO_D5..D8` as SPI3, and the DuoS DTS enables `&i2c4` (gt9xx) and `&spi3`; disable both nodes in the balance image or move the signals | `board_pins.c`, DTS |
-| PWM0 ch1/ch2 (`VIVO_D10/D9`) | C906L | not `insmod cv181x_pwm.ko` **[now: `duo-init.sh` loads it]** or not export those channels | `hw_pwm.c` |
+| I2C for the MPU – **[now]** I2C0 on `IIC0_SCL/SDA` (`BC_MPU_I2C_ID = 0`; set 1 for `PAD_MIPIRX4P/N`, which blocks the 15-pin camera) | C906L | `&i2c0` stays disabled (already so on DuoS); I2C2/I2C3 are camera buses. **Unverified on hardware:** that the IIC0 pads reach the DuoS header | `board_pins.h`, DuoS DTS |
+| `VIVO_D0..D8` (encoders, direction, STBY) | C906L | U-Boot (`cvi_board_init.c`) muxes `VIVO_D0/D1` as I2C4 (touch panel) and `VIVO_D5..D8` as SPI3; **[now]** `&i2c4` and `&spi3` are `disabled` in all four DuoS DTS (the touch panel/spidev on those pads no longer work in this image) | `board_pins.c`, DTS |
+| PWM0 ch1/ch2 (`VIVO_D10/D9`) | C906L | `duo-init.sh` **[now]** no longer loads `cv181x_pwm.ko` | `hw_pwm.c` |
 | XGPIOB 13–21 (`VIVO_D0..D8`) | C906L | never `echo N > /sys/class/gpio/export` for GPIO numbers 461–469 (Linux base 448 + n) | `board_pins.h` |
 | MIPI-RX / CSI (J1 16-pin: lanes 2/0/1, I2C3, MCLK0, reset `XGPIOA_2`; J2 15-pin: lanes 5/3/4, I2C2, MCLK1, reset `XGPIOA_4`), ISP, VENC, DWA, VPSS | Linux | one connector active at a time ([02 §3](02-video-streaming-wifi.md)); the RTOS must not touch I2C2/I2C3, `CAM_MCLK*`, `XGPIOA_2/4` | `cvi_mpi`, `loadsystemko.sh`, `sensor_cfg*.ini` |
 | SDIO Wi-Fi (AIC8800D80), BT UART | Linux | – | `duo-init.sh` |
@@ -93,12 +95,13 @@ flowchart LR
 | Linux RAM | `0x8000_0000` | 510 MiB (`DRAM_SIZE - FREERTOS_SIZE`) | Linux |
 | ION (video buffers) | `FREERTOS_ADDR - 170 MiB` | 170 MiB | Linux/VPSS/VENC |
 | **FreeRTOS carve-out** (`no-map` in DTS) | `0x9FE0_0000` | 2 MiB | C906L |
-| ↳ text/data/bss/stacks/heap | start of carve-out | image size unknown – measure with `size cvirtos.elf`; FreeRTOS heap is 512 or 650 KiB (`configTOTAL_HEAP_SIZE`) | C906L |
-| ↳ **bc_shm window [plan]** | `0x9FFF_0000` | 64 KiB (top of carve-out) | shared (see §6) |
+| ↳ text/data/bss/stacks/heap | start of carve-out | **measured** (CI build, DuoS): text 99 KB, data 0.8 KB, bss 708 KB (includes the 650 KiB FreeRTOS heap and 128 KiB boot stack); image ends at `0x9FEC5580` | C906L |
+| ↳ **bc_shm window** | `0x9FFF_0000` | 64 KiB (top of carve-out); ≈ 1.2 MiB of headroom remain between the image end and the window | shared (see §6) |
 
-`bc_shm` requires the linker script (`freertos/cvitek/scripts/cv181x_lscript.ld`) / heap size to leave
-the top 64 KiB untouched; add an assert in the linker script so a heap growth fails the build instead of
-silently overwriting the window.
+`cv181x_lscript.ld` defines `_bc_shm_base = ORIGIN + LENGTH - 0x10000` and
+`ASSERT(_end <= _bc_shm_base)`, so growth of the image into the window fails the link instead of silently
+corrupting the shared data. Linux maps the window through `/dev/mem` (`CONFIG_STRICT_DEVMEM` is not set in the
+DuoS kernel config).
 
 ## 3. Division of labour
 
@@ -108,8 +111,8 @@ silently overwriting the window.
 |----------|-----------|-------|
 | Wi-Fi (STA or AP), IP stack | `aic8800_bsp.ko`, `aic8800_fdrv.ko`, `wpa_supplicant`, `dnsmasq` | Already in `duo-init.sh` / defconfig. `hostapd` is *not* in the DuoS defconfig – add if AP mode is wanted. |
 | Camera → H.264/H.265 → RTSP | `cvi_mpi` (VI/ISP/VPSS/VENC), `cvi_rtsp` | See [02](02-video-streaming-wifi.md). |
-| Teleoperation server | `bcd` **[plan]** (C or Python 3, WebSocket on :8080) | Receives joystick, sends telemetry JSON, owns heartbeat to RTOS. |
-| Parameter store & tuning UI | `bcd` + `/mnt/data/bc_params.json` **[plan]** | Pushes parameter block into `bc_shm` at start and on change. |
+| Teleoperation server | `bcd` **[now]** (Python 3, WebSocket + web UI on :8080) | Receives joystick, sends telemetry JSON, owns the heartbeat to the RTOS. |
+| Parameter store & tuning UI | `bcd`/`bcctl` + `/mnt/data/bc_params.json` **[now]** | Pushes parameter block into `bc_shm` at start and on change. |
 | Telemetry logging | `bcd` → CSV/JSONL on SD | 50 Hz decimated records. |
 | Firmware lifecycle | `rproc-start.sh`, `burnd`, `/lib/firmware/*.elf` | Reload the RTOS image without reboot **only while disarmed**. |
 | Supervisor | `bcd` watchdog thread | Detects RTOS heartbeat loss → log, optionally `rproc` restart. |
@@ -151,241 +154,189 @@ sequenceDiagram
   participant BCD as bcd (Linux)
   FSBL->>RTOS: release reset (vector = FREERTOS_ADDR)
   RTOS->>RTOS: main_cvirtos(): request_irq(MBOX), main_create_tasks()
-  RTOS->>RTOS: balance_car_start(): pinmux, TB6612 (STBY=0), encoders
-  RTOS->>RTOS: IMU init, WHO_AM_I, gyro bias (≈1 s, robot must be still)
+  RTOS->>RTOS: balance_car_start(): shm init, pinmux, TB6612 (STBY=0), encoders + GPIO IRQ
+  RTOS->>RTOS: bc_ctrl task: IMU init, WHO_AM_I, 3-axis bias (≈1 s, robot must be still)
   RTOS->>RTOS: state = IDLE (DISARMED), PWM = 0, STBY = 0
   FSBL->>U: boot Linux
   U->>U: insmod cv181x_rtos_cmdqu.ko ... (loadsystemko.sh)
   U->>BCD: start bcd
-  BCD->>RTOS: SYS_CMD_INFO_LINUX_INIT_DONE (cmdqu, existing)
-  RTOS-->>BCD: SYS_CMD_INFO_RTOS_INIT_DONE + &transfer_config
-  BCD->>RTOS: BC_CMD_SET_PARAMS (shm seq++) then BC_CMD_APPLY_PARAMS
+  BCD->>BCD: wait for shm magic, load /mnt/data/bc_params.json
+  BCD->>RTOS: write param block (shm seq), BC_CMD_APPLY_PARAMS(seq)
+  RTOS-->>BCD: echo.applied_seq == seq (shm)
   BCD->>RTOS: BC_CMD_ARM
   RTOS->>RTOS: upright-and-still check (±3°, 1 s) → BALANCING
 ```
 
-**[now]** `balance_car_start()` arms the motors directly at boot if the IMU init succeeded
-(`g_armed = 1`). **[plan]** boot always ends in `IDLE`; arming requires either the `BC_CMD_ARM` command
-*or* a local policy flag (`BC_AUTOARM`, default off) plus the upright-and-still check. The RTOS must be
-able to run completely standalone (no Linux) for bench work: UART commands `arm`, `disarm`, `set k v`
-are a planned developer convenience.
+**[now]** Boot always ends in `IDLE` (motors off, `STBY` low). Arming requires the `BC_CMD_ARM` command and the
+upright-and-still check; there is no auto-arm and no UART shell yet (the RTOS has no RX path, a developer
+convenience left for later). The generic `SYS_CMD_INFO_LINUX_INIT_DONE` handshake is **not** used: `bcd` simply
+waits for the shared-memory magic (`'BCSM'`, written last by `bc_shm_init`) and then pushes parameters.
+`balance_car_start()` initialises the shared window *first*, so Linux can see the RTOS (state `BOOT`/`FAULT`)
+even if the IMU is missing; a re-load of the RTOS without a reboot increments `boot_count`.
 
 ## 5. FreeRTOS scheduling
 
-Kernel facts (from `freertos/cvitek/kernel/include/riscv64/FreeRTOSConfig.h`): preemptive, tick
-**200 Hz (5 ms)**, `configMAX_PRIORITIES = 8`, timer task at priority 7, heap 512/650 KiB, minimal
-stack 1024 words, RV64 `imafdc` / `lp64d` (hardware double-precision FPU is available).
+Kernel facts (`freertos/cvitek/kernel/include/riscv64/FreeRTOSConfig.h`): preemptive, tick **200 Hz (5 ms)**,
+`configMAX_PRIORITIES = 8`, timer task at priority 7, heap 650 KiB, minimal stack 1024 words, RV64
+`imafdc`/`lp64d` (hardware double-precision FPU). `INCLUDE_uxTaskGetStackHighWaterMark` was added for the
+stack telemetry.
 
-### 5.1 [now] task set
+### 5.1 Task set [now]
 
 | Task | Priority | Stack | Behaviour |
 |------|----------|-------|-----------|
-| `balance` (`balance_ctrl_task`) | idle+5 | 4×min | **Never blocks**: polls encoders, `udelay(40)`, `continue`s until `now - last ≥ 1 tick`. |
-| `CMDQU` | idle+5 | 1×min | Blocks on queue; handles `IP_SYSTEM` commands. |
-| ISP/VCODEC/VI/CAMERA/RGN | idle+3 | – | Queues exist; only RGN and AUDIO have run functions in this image. |
-| AUDIO | idle+3 | 15×min | Present in the image. |
-| Timer task | 7 | 2×min | FreeRTOS software timers. |
+| `bc_ctrl` (`balance_ctrl_task`) | idle+6 | 4×min | **blocks** in `vTaskDelayUntil(1 tick)`; one control cycle per tick, measured `dt`; the only hard real-time task |
+| `CMDQU` (existing) | idle+5 | 1×min | mailbox dispatcher; unchanged |
+| `BALANCE` (`prvBalanceCommTask`) | idle+4 | 2×min | blocks on the `E_QUEUE_BALANCE` queue; handles Linux commands (created by `comm_main.c`, queue length 16) |
+| `RGN`, `AUDIO` (existing) | idle+3 | – | still created by the image; they now get CPU because `bc_ctrl` no longer busy-waits |
+| `bc_console` | idle+2 | 3×min | wakes every 100 ms, prints state changes/events from the shm ring and a 1 Hz status line – **`printf` never runs in `bc_ctrl`** |
+| Timer task (FreeRTOS) | 7 | 2×min | unchanged |
+| encoder GPIO ISR | PLIC irq 42 (`GPIO1_INTR_FLAG`) | – | both-edge interrupts on the four encoder pins; body = clear status, decode both encoders (a few µs) |
+| mailbox ISR (existing) | irq 61 | – | `prvQueueISR` now also routes `IP_BALANCE` |
 
-Consequences of the current design (details in [06 §2](06-development-roadmap.md)):
+Deviation from the first design: **no dedicated hardware-timer ISR**. The control task is paced by the 200 Hz
+tick (decision D6 in [06](06-development-roadmap.md): keep the global tick semantics). The actual period is
+measured every cycle (`period_us`, `exec_us` are in each telemetry record, `deadline_miss` counts periods
+> 7.5 ms), so tick jitter is visible rather than assumed away; a HW-timer-driven variant stays an option if
+`HIL-07` shows more than ±0.1 ms.
 
-1. Control period is **exactly one 5 ms tick**; the loop actually runs whenever the busy-wait notices a
-   tick change, so jitter is `tick phase + printf blocking + I2C time`, and `dt` is assumed constant.
-2. A never-blocking task at idle+5 starves everything below it (audio, RGN, idle task) – tolerable
-   only because those are unused here.
-3. A blocking `printf` of a ≈110-char line at 115 200 baud takes ≈ 10 ms **[est]**, longer than one
-   control period. It runs every 2 s inside the loop.
-4. Encoders are only sampled between I2C transfers; a 14-byte I2C read at 400 kHz takes ≈ 0.4 ms
-   **[est]**, during which edges are lost.
+What changed relative to the first firmware version: busy-wait loop → blocking task (S4); `printf` removed from
+the loop (S5); encoders from edge interrupts instead of polling between I2C transfers (S6, selectable with
+`BC_ENC_USE_IRQ`); PWM update-in-place quirk (S12) is **not** changed yet.
 
-### 5.2 [plan] target task set
+### 5.2 Control cycle (`bc_ctrl`, every 5 ms) [now]
 
-```
-priority
-  7  Timer task (FreeRTOS)                   – unchanged
-  6  bc_ctrl      200 Hz, notified by HW timer ISR  – the ONLY hard real-time task
-  5  CMDQU        existing mailbox dispatcher       – blocks on queue
-  4  bc_comm      event + 50 Hz telemetry publisher – blocks on queue/timer
-  3  (ISP/VI/VCODEC/RGN/AUDIO – not created in the balance image)
-  2  bc_console   drains log ring to UART, rate limited
-  0  idle (+ idle hook: stack high-water, CPU load, heartbeat toggle)
- ISR  TIMER (200 Hz)  → vTaskNotifyGiveFromISR(bc_ctrl)
- ISR  GPIO (encoder A/B edges, both) → update count, timestamp (≤ 2 µs body)
- ISR  MBOX (existing prvQueueISR) → xQueueSendFromISR(CMDQU/BALANCE queue)
-```
+| Step | Action |
+|------|--------|
+| 1 | `vTaskDelayUntil`; `period_us` from `rdtime`; `dt = clamp(period, 2 ms, 10 ms)`; deadline accounting |
+| 2 | (polling fallback only: `encoder_poll` ×2) · IMU 14-byte burst read; scale (±2 g, ±500 °/s), boot bias removed |
+| 3 | command snapshot from the comm task + Linux heartbeat (shm word, 20 Hz, and mailbox) → `bc_cmd_effective()`: clamp, timeout → 0 |
+| 4 | events (ARM/DISARM/ESTOP/…) and pending parameter set (applied here, echoed to shm) |
+| 5 | **`bc_core_step()`**: IMU health → estimator → state machine → (BALANCING only) speed PI → angle PD → turn PI → mixer/deadband → motor sign |
+| 6 | actuators: BALANCING → `STBY=1` + direction pins + PWM; every other state → coast + `STBY=0` (also refreshed every 100 ms) |
+| 7 | runtime calibration requests (gyro / level trim) – only while `IDLE`; cadence restarted afterwards |
+| 8 | state-change events → shm event ring; status words every cycle; heartbeat 10 Hz; **telemetry record every 4th cycle (50 Hz)** |
 
-| Task | Trigger | WCET budget **[est]** | Stack | Notes |
-|------|---------|-----------------------|-------|-------|
-| `bc_ctrl` | `ulTaskNotifyTake` from timer ISR | 1.0 ms (I2C 0.4 ms + math 0.05 ms + PWM 0.05 ms + margin) | 4 KiB | Measures its own `dt` from the free-running timer; records `exec_us`, `period_us`, `jitter_us`. |
-| `bc_comm` | queue from mailbox ISR; 20 ms periodic timer | 0.3 ms | 2 KiB | Never calls into `bc_ctrl` data except through the lock-free snapshot (§6.3). |
-| `bc_console` | log ring non-empty | – | 2 KiB | Drops lines when the ring is full (counter exported in telemetry). |
-| idle hook | idle | – | – | Computes CPU load; toggles a status GPIO for scope-based liveness check. |
-
-**Timer source.** Use a dedicated hardware timer (the C906L has the CLINT `mtime`/`mtimecmp` and the
-SoC timers used by the RTOS HAL) rather than raising `configTICK_RATE_HZ`, so the rest of the image
-keeps its 200 Hz tick semantics. Decision record: if the HAL timer path is awkward, raising the tick
-to 1 kHz and using `vTaskDelayUntil(5 ticks)` is an acceptable second choice; verify nothing else in
-the image depends on 200 Hz.
-
-**Rules**
-
-* `bc_ctrl` never calls blocking APIs other than its own notify-take; no `printf`, no `malloc`.
-* Mutexes are not used across the control path. Shared state between `bc_ctrl` and `bc_comm` uses
-  single-writer snapshots with sequence counters.
-* Stack high-water marks are exported in telemetry; CI hardware tests fail if any task < 25 % free.
-* Deadline miss (period > 7.5 ms or exec > 3 ms) increments `deadline_miss`; 3 misses in 1 s → fault
-  `FAULT_TIMING` → disarm.
-
-### 5.3 Control cycle – ordered steps (`bc_ctrl`, every 5 ms)
-
-| Step | Action | Budget **[est]** |
-|------|--------|------------------|
-| 1 | `t_now = timer_us()`; `dt = clamp(t_now - t_prev, 2 ms, 10 ms)` | 2 µs |
-| 2 | IMU burst read (14 B). On failure: `imu_fail++`, reuse last sample for ≤ 2 cycles, then FAULT | 400 µs |
-| 3 | Scale, axis-map, bias-correct; estimator → `θ`, `ω` | 20 µs |
-| 4 | Snapshot encoder counts; `v_l`, `v_r` (m/s), low-pass; odometry | 10 µs |
-| 5 | Read latest command snapshot (target speed/turn, flags); apply watchdog policy | 2 µs |
-| 6 | Safety checks (fall, lift, saturation, IMU sanity, timing) → state machine | 5 µs |
-| 7 | If BALANCING: speed loop → angle setpoint; angle PD → `u`; turn loop; mix; deadband compensation; clamp | 15 µs |
-| 8 | Write STBY/IN pins and PWM duty; if not BALANCING force coast | 50 µs |
-| 9 | Fill telemetry slot (every 4th cycle → 50 Hz) and publish with seqlock | 10 µs |
-
-Total ≈ 0.5 ms of the 5 ms budget (≈ 10 % CPU) **[est]**; the I2C transfer dominates and is a polled
-busy-wait today. Moving to an IRQ- or DMA-driven read is only worth it if measured jitter requires it.
+Step 5 is hardware independent and is exactly the code the host tests and the closed-loop simulation run
+(`bc_core.c`); steps 1–4, 6–8 are the thin I/O shell in `balance_main.c`.
 
 ## 6. Inter-core communication
 
-Three layers, each used for what it is good at:
-
 | Layer | Capacity | Direction | Used for |
 |-------|----------|-----------|----------|
-| **L1 Mailbox / `cmdqu_t`** | 8 slots × 8 B, hardware IRQ both ways | both | doorbells and small commands (≤ 4 B payload) |
-| **L2 Shared memory `bc_shm`** | 64 KiB window | both (single-writer fields) | parameters, telemetry ring, event log, bulk data |
-| **L3 UART console** | 115 200 baud | RTOS → human | boot log, developer shell; *not* a machine interface |
+| **L1 Mailbox / `cmdqu_t`** | 8 slots × 8 B, hardware IRQ | Linux → RTOS (RTOS → Linux optional, off) | commands, heartbeat |
+| **L2 Shared memory `bc_shm_t`** | 64 KiB window | both, single writer per cache line | parameters, telemetry ring, event ring, status, heartbeats |
+| **L3 UART console** | 115 200 baud | RTOS → human | boot log, 1 Hz status; not a machine interface |
 
-### 6.1 L1 – mailbox protocol (existing driver, new IP id)
+### 6.1 L1 – mailbox protocol [now]
 
-Existing facts (`freertos/cvitek/driver/rtos_cmdqu/include/rtos_cmdqu.h`, mirrored in
-`osdrv/interdrv/rtos_cmdqu/rtos_cmdqu.h`):
+`cmdqu_t` is exactly 8 bytes; `resv` is used by the mailbox validity handshake, so the usable payload is the
+32-bit `param_ptr`. Linux sends through `/dev/cvi-rtos-cmdqu` (`ioctl(RTOS_CMDQU_SEND = 0x40087201, &cmdqu_t)`,
+the existing driver); the RTOS ISR copies the message and routes by `ip_id`.
 
-```c
-struct cmdqu_t {            /* exactly 8 bytes, packed */
-    uint8_t  ip_id;         /* routes to a FreeRTOS queue                      */
-    uint8_t  cmd_id : 7;
-    uint8_t  block  : 1;    /* sender waits for a reply                        */
-    union { struct { uint8_t linux_valid, rtos_valid; } valid;  /* set by the   */
-            uint16_t mstime; } resv;                            /* mailbox code */
-    uint32_t param_ptr;     /* 32-bit payload or physical address              */
-};
-```
+Changes made to the existing code: `IP_BALANCE = 8` in both copies of `rtos_cmdqu.h`
+(`freertos/…/rtos_cmdqu.h`, `osdrv/interdrv/rtos_cmdqu/rtos_cmdqu.h`); `E_QUEUE_BALANCE` in `comm_def.h`; a
+`BALANCE` entry in `gTaskCtx[]` (only runs when the image is built for `cv181x`); `case IP_BALANCE` in `prvQueueISR`.
 
-* `resv` is consumed by the slot-validity handshake, so **the only usable payload is the 32-bit
-  `param_ptr`**.
-* Linux side: `/dev/cvi-rtos-cmdqu`, ioctls `RTOS_CMDQU_SEND`, `RTOS_CMDQU_SEND_WAIT`; in-kernel
-  `rtos_cmdqu_send()` / `request_rtos_irq(ip_id, handler, …)`.
-* RTOS side: `prvQueueISR()` copies the 8-byte message out of the mailbox buffer and dispatches by
-  `ip_id` with `xQueueSendFromISR`; the `CMDQU` task replies via the mailbox set register.
+| `cmd_id` | Name | `param_ptr` | Effect |
+|----------|------|-------------|--------|
+| 0x01 | `BC_CMD_PING` | nonce | logs `BC_EVT_LOG_PONG` (val = nonce, RTOS timestamp) to the event ring – used to measure latency |
+| 0x02 / 0x03 | `BC_CMD_ARM` / `BC_CMD_DISARM` | – | event bit for the state machine |
+| 0x04 | `BC_CMD_SET_TARGET` | `int16 speed [mm/s]` \| `int16 turn [mrad/s]` << 16 | new target (fire-and-forget, repeated at 20 Hz) |
+| 0x05 | `BC_CMD_APPLY_PARAMS` | shm parameter-block sequence | RTOS reads + validates the block, queues it, replies by logging `BC_EVT_LOG_PARAMS` (arg = 0 ok, else 1 + bad field / 101 torn / 102 crc-size-version) |
+| 0x06 | `BC_CMD_HEARTBEAT` | counter | refreshes the heartbeat watchdog |
+| 0x07 | `BC_CMD_CALIBRATE` | 1 gyro, 2 level trim | honoured only in `IDLE` |
+| 0x08 | `BC_CMD_ESTOP` | – | latched `ESTOP` state |
+| 0x40–0x45 | `BC_EVT_*` | – | RTOS → Linux events. **Disabled by default (`BC_MBOX_EVENTS = 0`)**: the stock Linux driver logs an error for every message whose `ip_id` has no registered handler. All events are in the shm event ring instead; flip the flag once a Linux handler is registered with `request_rtos_irq(IP_BALANCE, …)`. |
 
-**Change set [plan]** (touches both copies of `rtos_cmdqu.h`, `comm_def.h`, `comm_main.c`):
+Delivery semantics: setpoints are idempotent and periodic; `ARM/DISARM/ESTOP/APPLY_PARAMS` are confirmed by the
+state in shm (`status.state`, event ring, `echo.applied_seq`) – `bcd` waits for the echo (1 s) and reports
+failure. Unknown commands increment `status.lost_cmds`.
 
-1. `enum IP_TYPE { …, IP_CAMERA, IP_BALANCE, IP_LIMIT }` – new id `IP_BALANCE = 8`.
-2. `QUEUE_HANDLE_E` gets `E_QUEUE_BALANCE`; `gTaskCtx[]` gets a `"BALANCE"` entry with queue length 16 and
-   `runTask = prvBalanceCommTask`; `prvQueueISR` gets `case IP_BALANCE`.
-3. Linux registers `request_rtos_irq(IP_BALANCE, bc_irq_handler, "bc", dev)` in a small char driver (or
-   uses the existing ioctl path from user space and polls shm for replies – first iteration).
+### 6.2 L2 – shared-memory layout `bc_shm_t` [now]
 
-**Command set** (`cmd_id` is 7 bits → 0..127):
-
-| `cmd_id` | Name | Dir | `param_ptr` payload | Reply |
-|----------|------|-----|---------------------|-------|
-| 0x01 | `BC_CMD_PING` | L→R | nonce | `BC_EVT_PONG` echo nonce |
-| 0x02 | `BC_CMD_ARM` | L→R | bit0: require upright check | `BC_EVT_STATE` |
-| 0x03 | `BC_CMD_DISARM` | L→R | reason code | `BC_EVT_STATE` |
-| 0x04 | `BC_CMD_SET_TARGET` | L→R | `int16 speed [mm/s]` \| `int16 turn [mrad/s]` << 16 | none (fire-and-forget; 20–50 Hz) |
-| 0x05 | `BC_CMD_APPLY_PARAMS` | L→R | seq number of the param block in shm | `BC_EVT_PARAMS_ACK` (ok/err code) |
-| 0x06 | `BC_CMD_HEARTBEAT` | L→R | monotonic counter (10 Hz) | none |
-| 0x07 | `BC_CMD_CALIBRATE` | L→R | 1 = gyro bias, 2 = level trim | `BC_EVT_CALIB_DONE` |
-| 0x08 | `BC_CMD_ESTOP` | L→R | – | `BC_EVT_STATE` (latched FAULT_ESTOP) |
-| 0x40 | `BC_EVT_STATE` | R→L | state (8 b) \| fault code (8 b) \| flags (16 b) | – |
-| 0x41 | `BC_EVT_PONG`, `0x42 BC_EVT_PARAMS_ACK`, `0x43 BC_EVT_CALIB_DONE` | R→L | result | – |
-| 0x44 | `BC_EVT_HEARTBEAT` | R→L | RTOS counter (10 Hz) | – |
-| 0x45 | `BC_EVT_FAULT` | R→L | fault code, value | – |
-
-Delivery semantics: the mailbox has only 8 slots, and `rtos_cmdqu_send` fails when all are valid; the
-RTOS queue length is 16. Therefore:
-
-* Setpoints are **idempotent and periodic** – a lost `SET_TARGET` is replaced by the next one.
-* `ARM`, `DISARM`, `ESTOP`, `APPLY_PARAMS` are acknowledged; `bcd` retries up to 3× with 50 ms timeout.
-* `ESTOP` additionally has a **hardware path** (see §7.3) so it does not depend on a healthy mailbox.
-
-### 6.2 L2 – shared-memory layout `bc_shm_t` [plan]
-
-All integers little-endian, 4-byte aligned, `_Static_assert(sizeof == 0x10000)`, shared header
-`bc_shm.h` included from both the RTOS and the Linux daemon (C, no dependencies).
+`include/bc_shm.h` (`_Static_assert`s check every offset); mirrored by the generated
+`bc_layout.py` (CI regenerates it and a test compares it with the C compiler's offsets).
 
 | Offset | Size | Writer | Content |
 |--------|------|--------|---------|
-| 0x0000 | 64 B | RTOS (once) | `magic 'BCSM'`, `version`, `size`, `build_id[16]`, `rtos_boot_count` |
-| 0x0040 | 64 B | both (separate words) | `rtos_heartbeat` (RTOS), `linux_heartbeat` (Linux), `state`, `fault`, `deadline_miss`, `imu_err`, `cpu_load_pct`, `stack_min[4]` |
-| 0x0080 | 128 B | Linux | **setpoint block**: `seq`, `speed_mmps`, `turn_mradps`, `flags`, `crc16` (mirror of `SET_TARGET` for bulk/recovery) |
-| 0x0100 | 1 KiB | Linux | **parameter block A/B** (double buffered): `seq`, `crc32`, all gains/limits (§6.4) |
-| 0x0500 | 256 B | RTOS | live parameter echo (what the RTOS is actually using) |
-| 0x0600 | 256 B | RTOS | **calibration**: gyro bias xyz, accel offsets, level-trim angle, wheel-odometry constants |
-| 0x0800 | 24 KiB | RTOS | **telemetry ring**: 256 × 64 B records at 50 Hz (≈ 5 s history) |
-| 0x6800 | 8 KiB | RTOS | **event log ring**: 128 × 64 B (state changes, faults, command acks) |
-| 0x8800 | 30 KiB | – | reserved (e.g. 200 Hz burst capture buffer for tuning: 1 000 × 32 B) |
+| 0x0000 | 64 B | RTOS (once, magic last) | `magic 'BCSM'`, `version`, `size`, `boot_count`, `build_id[16]` |
+| 0x0040 | 64 B | RTOS | status: `rtos_heartbeat` (10 Hz), `state`, `fault`, `deadline_miss`, `imu_err`, `cpu_load_pct` (not measured yet, 0), `telem_head`, `event_head`, `cycles`, `lost_cmds`, `stack_min[4]` |
+| 0x0080 | 64 B | **Linux** | `linux_heartbeat` (10 Hz), `linux_flags` |
+| 0x0100 | ≤ 1 KiB | **Linux** | parameter block (seqlock): `seq`, `crc32`, `version`, `size`, `bc_params_t` |
+| 0x0500 | ≤ 256 B | RTOS | parameter echo (what is actually in use): `seq`, `applied_count`, `last_result`, `applied_seq`, `bc_params_t` |
+| 0x0600 | 512 B | – | calibration block (reserved; calibration results are reported through the event ring today) |
+| 0x0800 | 16 KiB | RTOS | telemetry ring: 256 × 64 B at 50 Hz (≈ 5 s of history) |
+| 0x4800 | 4 KiB | RTOS | event ring: 128 × 32 B (state changes, commands, parameter results, calibration) |
+| 0x5800 | 42 KiB | – | reserved |
 
-Telemetry record (64 B, fixed):
+Telemetry record (64 B): `seq` (2n+2 when stable), `t_us`, pitch / accel-pitch / gyro-y / gyro-z (0.01 units),
+accel norm [mg], wheel speeds [mm/s], angle command, motor demand [‰], targets, raw encoder counts,
+`vbat_mv` (0: no ADC yet), `exec_us`, `period_us`, state, fault, `imu_err`, flags (gated, targets zeroed, hb lost,
+saturated), CRC-32 over bytes 4–59.
 
-```c
-typedef struct {
-    uint32_t seq;            /* even=stable, odd=being written (seqlock)       */
-    uint32_t t_us;           /* RTOS monotonic µs, wraps after 71 min          */
-    int16_t  pitch_cdeg;     /* 0.01° (estimator output)                        */
-    int16_t  pitch_acc_cdeg; /* accel-only angle, for diagnosing the filter     */
-    int16_t  gyro_y_cdps;    /* 0.01 °/s                                        */
-    int16_t  gyro_z_cdps;
-    int16_t  accel_norm_mg;
-    int16_t  speed_l_mmps, speed_r_mmps;
-    int32_t  enc_l, enc_r;   /* raw counts                                      */
-    int16_t  angle_set_cdeg; /* output of speed loop                            */
-    int16_t  motor_l_pm, motor_r_pm;  /* per-mille, signed                      */
-    int16_t  target_speed_mmps, target_turn_mradps;
-    uint16_t vbat_mv;        /* 0 if no ADC                                     */
-    uint16_t exec_us, period_us;
-    uint8_t  state, fault, imu_err, flags;
-    uint32_t crc32;          /* over bytes 4..59, optional in release builds    */
-} bc_telem_t;
-```
+### 6.3 Memory-ordering and cache rules [now]
 
-### 6.3 Memory-ordering and cache rules (the part that usually bites)
-
-The C906L and the A53 have independent caches; only the mailbox hardware synchronises them.
-`comm_main.c` already follows this pattern (`flush_dcache_range()` after writing structures that Linux
-reads – see the trace-snapshot path), so the same primitive is used:
+The C906L and the A53 have independent caches; only the mailbox synchronises them.
 
 | Rule | Detail |
 |------|--------|
-| W1 | **RTOS writer** (telemetry, event log, calibration, echo): write all fields → `fence w,w` → write `seq` (odd→even protocol) → `flush_dcache_range(rec, size)` → bump `head`; `flush_dcache_range(&head)`. |
-| W2 | **RTOS reader** (setpoint, parameters): `invalidate_dcache_range(block, size)` first, then read `seq` → copy → re-read `seq`; accept only if equal and even (and `crc` OK for params). |
-| W3 | **Linux mapping**: map the window **non-cacheable** (reserved-memory node with `no-map` + UIO/char driver using `pgprot_noncached`/`pgprot_writecombine`; for development `/dev/mem` with `O_SYNC`). Then Linux needs no cache maintenance, only `__sync_synchronize()` between payload and sequence writes. |
-| W4 | Each field has **one writer** (table above). Counters (`heartbeat`) are 32-bit aligned stores; no read-modify-write across cores. |
-| W5 | Parameters are applied **atomically at a control-cycle boundary**: RTOS validates (range, NaN, crc), copies to its private struct, echoes, acks; on failure keeps the old set and reports the code. |
-| W6 | Telemetry consumers (Linux) detect overruns by `seq`/`head` gap and count `lost_records`; the RTOS never waits for Linux. |
+| W1 | **One writer per 64-byte cache line.** The RTOS never *cleans/flushes* a line Linux writes (a write-back would clobber Linux data); it only *invalidates* before reading (`inv_dcache_range` – param block, `linux_heartbeat`). Linux-written lines (0x80, 0x100…) are separate from every RTOS-written line. |
+| W2 | RTOS writers use `clean_dcache_range` after finishing a record (`BC_SHM_CLEAN`); records use a **seqlock** (odd = being written, `2n+2` = stable) and a CRC so readers detect torn reads. |
+| W3 | Linux maps the window with `/dev/mem` + `O_SYNC` (device/non-cacheable on arm64) – no cache maintenance needed, only in-order stores. |
+| W4 | Parameters are applied atomically at a control-cycle boundary after validation (range, finite, ±1 for signs, CRC, version); on failure the old set stays and the result code is reported. |
+| W5 | Readers detect overrun (`head − n > slots`) and count `lost`; the RTOS never waits for Linux. |
+| W6 | `bc_shm_init` zeroes the whole window once at RTOS start; Linux must not write before it sees the magic. |
 
-### 6.4 Parameter block (single source of truth)
+Verified by: 11 host tests in `test_shm.c` (two-thread seqlock stress with 300 000 records, corruption, overrun,
+wrap, parameter block) and the Python↔C interop tests.
 
-| Group | Names (unit) | Default **[plan]** |
-|-------|--------------|--------------------|
-| estimator | `alpha`, `accel_gate_g`, `gyro_range_dps` | 0.998, 0.10, 500 |
-| angle loop | `a_kp (%/°)`, `a_kd (%/(°/s))`, `a_ki`, `trim_deg`, `out_max (%)` | 15, 0.8, 0, 0, 90 |
-| speed loop | `v_kp (°/(m/s))`, `v_ki (°/m)`, `v_max_deg`, `v_filter` | 1.94, 1.94, 8, 0.3 |
-| turn loop | `t_kp`, `t_ki`, `t_max (%)`, `turn_speed_scale` | 5, 5, 20, 0.5 |
-| limits | `fall_deg`, `lift_speed_mps`, `sat_ms`, `v_max_mps`, `w_max_rads`, `acc_max_mps2` | 45, 1.5, 300, 0.5, 2.0, 0.5 |
-| actuator | `deadband_pct`, `pwm_slew`, `motor_sign_l/r`, `enc_sign_l/r`, `imu_sign` | 6, none, ±1 |
-| mechanics | `wheel_diam_m`, `track_m`, `enc_cpr` | 0.065, 0.17, 3960 |
-| watchdog | `hb_zero_ms`, `hb_disarm_ms` | 500, 0 (never) |
+### 6.4 Parameter block (single source of truth) [now]
 
-Defaults are *starting points derived from the simulated model* – see [04](04-pid-and-motion-control.md).
+All fields are 32-bit; list, ranges and defaults come from one X-macro in `include/bc_params.h`
+(`bc_params_t`, `bc_param_table`, validation). Board-level sign overrides live in `board_pins.h`
+(`BC_BOARD_*_SIGN`); every value can be changed at run time from Linux (`bcctl set`, WebSocket `param`).
+
+| Name | Type | Default | Range | Meaning |
+|------|------|---------|-------|---------|
+| `est_alpha` | float | 0.998 | 0.9 … 0.9999 | complementary gyro weight (τ = α·dt/(1−α) = 2.5 s) |
+| `est_gate_g` | float | 0.1 | 0 … 1 | accel-norm gate, 0 = off |
+| `est_bias_gain` | float | 0.02 | 0 … 1 | online gyro-bias gain [1/s] |
+| `a_kp` | float | 15 | 3.5 … 60 | % per deg |
+| `a_kd` | float | 0.8 | 0 … 5 | % per (deg/s), applied to the gyro rate |
+| `a_ki` | float | 0 | 0 … 5 | % per (deg·s), normally 0 |
+| `trim_deg` | float | 0 | -15 … 15 | mechanical balance point |
+| `a_out_max` | float | 90 | 20 … 100 | angle-loop output limit [%] |
+| `v_kp` | float | 1.94 | 0 … 8 | deg per (m/s), magnitude (loop applies the sign) |
+| `v_ki` | float | 1.94 | 0 … 8 | deg per m |
+| `v_max_deg` | float | 8 | 0 … 20 | speed-loop lean limit |
+| `v_filter` | float | 0.3 | 0.01 … 1 | wheel-speed low-pass |
+| `t_kp` | float | 5 | 0 … 30 | % per (rad/s) yaw rate |
+| `t_ki` | float | 5 | 0 … 30 |  |
+| `t_max` | float | 20 | 0 … 50 | turn authority [%] |
+| `t_speed_scale` | float | 0.5 | 0.05 … 5 | turn authority shrinks above this speed [m/s] |
+| `deadband_pct` | float | 6 | 0 … 20 | motor dead zone compensation |
+| `motor_max_pct` | float | 90 | 20 … 100 |  |
+| `acc_max` | float | 0.5 | 0.05 … 5 | target slew [m/s²] |
+| `alpha_max` | float | 3 | 0.1 … 20 | yaw target slew [rad/s²] |
+| `v_max` | float | 0.5 | 0 … 2 | [m/s] |
+| `w_max` | float | 2 | 0 … 6 | [rad/s] |
+| `fall_deg` | float | 45 | 20 … 80 |  |
+| `lift_speed_mps` | float | 1.5 | 0.3 … 5 |  |
+| `sat_ms` | float | 300 | 50 … 5000 | saturation fault time |
+| `cmd_timeout_ms` | float | 500 | 100 … 10000 | target / heartbeat timeout → targets forced to 0 |
+| `hb_disarm_ms` | float | 0 | 0 … 600000 | Linux silent this long → DISARM (0 = never) |
+| `wheel_diam_m` | float | 0.065 | 0.02 … 0.3 |  |
+| `track_m` | float | 0.17 | 0.05 … 0.6 |  |
+| `enc_cpr` | float | 3960 | 100 … 100000 | counts per wheel revolution |
+| `imu_sign` | sign | 1 | -1 … 1 | flips angle and rate together |
+| `motor_sign_l` | sign | 1 | -1 … 1 |  |
+| `motor_sign_r` | sign | 1 | -1 … 1 |  |
+| `enc_sign_l` | sign | 1 | -1 … 1 |  |
+| `enc_sign_r` | sign | 1 | -1 … 1 |  |
+
+Defaults are the simulation-derived starting point from [04](04-pid-and-motion-control.md); they are *not* tuned
+on a real chassis.
 
 ## 7. Safety architecture
 
@@ -424,10 +375,10 @@ Outputs by state: `BALANCING` → PID outputs; every other state → `tb6612_coa
 | `IMU_RANGE` | gyro raw at ±32767 for >3 cycles; accel norm outside 0.5–1.5 g for >100 ms | same | until DISARM |
 | `SATURATION` | `|u| ≥ out_max` continuously > `sat_ms` | coast | until DISARM |
 | `TIMING` | 3 deadline misses in 1 s | coast | until DISARM |
-| `HB_LOST` | no Linux heartbeat for `hb_zero_ms` | **targets → 0 (keep balancing)**; `hb_disarm_ms` optional hard stop | auto-clear |
+| `HB_LOST` | no Linux heartbeat / target for `cmd_timeout_ms` (500 ms) | **targets → 0 (keep balancing)** [now]; `hb_disarm_ms` > 0 adds an optional DISARM [now] | auto-clear |
 | `PARAM` | param block failed validation | keep old params, report | no |
 | `ESTOP` | command or hardware line | coast | until DISARM |
-| `RTOS_DEAD` | **Linux** sees `rtos_heartbeat` frozen for 300 ms (RTOS crashed/halted, e.g. `remoteproc stop`) | Linux **emergency path**: clear the `STBY` GPIO bit directly (single documented exception to P3, §7.3) and log | until reboot / re-arm |
+| `RTOS_DEAD` | **Linux** sees `rtos_heartbeat` frozen for 300 ms (RTOS crashed/halted, e.g. `remoteproc stop`) | Linux **emergency path** [now, in `bcd.py`]: clear the `STBY` bit in the GPIOB data register via `/dev/mem` (single documented exception to P3, §7.3), once per freeze, re-armed when the heartbeat resumes | until reboot / re-arm |
 
 ### 7.3 Hardware kill path and the "dead RTOS" problem
 
@@ -435,7 +386,7 @@ If the C906L crashes or is stopped, the PWM block and the GPIO output latches ar
 last values** (peripheral state does not depend on the CPU – to be confirmed by test `SAF-08`). The car
 would then keep driving at the last duty. Two independent mitigations:
 
-1. **Linux emergency path [plan]:** `bcd` watches `rtos_heartbeat`; if it stops for 300 ms it clears the
+1. **Linux emergency path [now]:** `bcd` watches `rtos_heartbeat`; if it stops for 300 ms it clears the
    `STBY` bit (`GPIOB` data register, bit 15) with a direct register write. This is the only place where
    Linux touches an RTOS-owned pin; it is idempotent, one-way (towards the safe state) and documented in
    the code. It does not help if Linux is also dead.

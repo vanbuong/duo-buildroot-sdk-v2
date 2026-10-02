@@ -76,35 +76,26 @@ the pipeline is configured for a single sensor (`dev_num = 1`), which matches "o
 * The RTOS must not configure `CAM_MCLK*`, `XGPIOA_2/4`, I2C2 or I2C3 (note: the HAL has `PINMUX_CAM0/CAM1/I2C3`
   helpers – never call them from the balance firmware).
 
-### 3.1 Selecting the active camera
+### 3.1 Selecting the active camera [now]
 
-Policy: **one sensor configured and running; the other connector's sensor is held in reset** (drive its reset
-line active, no MCLK) so it cannot disturb the bus or the CSI receiver.
+Policy: **one sensor configured and running; the other connector's sensor is held in reset** (reset line driven
+active, so it cannot disturb its I2C bus or the CSI receiver).
 
 | Mode | Behaviour |
 |------|-----------|
-| `auto` (default) | at boot, probe both sensor I2C buses (below); if exactly one answers use it; if both answer use `preferred` (default J1); if none, start without video |
-| `j1` / `j2` | forced selection from `/mnt/data/bc_camera.conf` or `bcctl camera j1|j2` |
+| `auto` (default) | at start `bc_camera.py` releases each connector's reset, probes its sensor I2C bus for the known chip ids; exactly one answers → use it; both → `preferred` (default J1); none → `preferred` anyway (the sensor does not answer while its MCLK is off, so *none detected* is the normal case before the pipeline ran) |
+| forced | `/mnt/data/bc_camera.conf` (`{"force":"j2"}` or `{"preferred":"j2"}`) or `bc_camera.py --force j1|j2` |
 
-Implementation [plan] – `bc-camera` script run from `S97bc-video` **before** the pipeline starts:
+`bc_camera.py` copies the matching `/mnt/data/sensor_cfg_*.ini` over `/mnt/data/sensor_cfg.ini` (the file the
+SDK's `cvi_mipi_rx.ko`/`snsr_i2c.ko` read at pipeline start) and prints a JSON result (`connector`, `sensor`,
+`ini`, `why`, `detected`); exit code 2 means "no usable camera" (missing ini, or a sensor without SDK driver such as
+IMX219). Chip-id registers used (from the datasheets, **verify on hardware**): GC2083 `0xF0/0xF1 = 0x20 0x83`
+@0x37 on bus 3; OV5647 `0x300A/0x300B = 0x56 0x47` @0x36 (bus 3 on J1, bus 2 on J2); IMX219 `0x0000/0x0001 =
+0x02 0x19` @0x10 on bus 2.
 
-```sh
-# 1. probe (sensor held out of reset first; chip-id registers per datasheets – verify on hardware)
-#    GC2083  bus 3 @0x37 : regs 0xF0/0xF1 = 0x20 0x83
-#    OV5647  bus 2 @0x36 : regs 0x300A/0x300B = 0x56 0x47
-#    IMX219  bus 2 @0x10 : regs 0x0000/0x0001 = 0x02 0x19      (only if a driver is added)
-# 2. copy the matching ini over /mnt/data/sensor_cfg.ini
-#      GC2083 -> sensor_cfg_GC2083.ini     OV5647@J2 -> sensor_cfg_OV5647_J2.ini
-# 3. hold the unused sensor in reset via sysfs GPIO (XGPIOA_2 or XGPIOA_4; Linux number = 480 + n **[verify base]**)
-# 4. start bc-video (VI/ISP/VENC/RTSP) with the selected sensor name
-```
-
-Switching camera at run time = stop `bc-video`, rewrite the ini, restart (a few seconds); no kernel module
-reload should be needed since `snsr_i2c.ko`/`cvi_mipi_rx.ko` read the ini at pipeline start **[verify – if
-not, reload those two modules]**. The robot keeps balancing during the switch (video is decoupled).
-
-The unused connector must be empty or its sensor idle; hot-plugging a camera is not supported (reboot or
-`bcctl camera rescan`).
+Switching camera at run time = stop the RTSP server, run `bc_camera.py --force …`, restart it. Whether the SDK
+modules must be reloaded for a new ini is **unverified**. The balance loop is unaffected by the switch. Hot-plugging
+a camera is not supported.
 
 ### 3.2 Sensor support status
 
@@ -163,71 +154,85 @@ Latency-oriented encoder settings **[plan]**:
 * IDR on demand when a client connects or after packet loss (RTSP `PLI`-like behaviour via the
   `CVI_VENC_RequestIDR` call present in `cvi_mpi/sample/venc`).
 
-## 6. Software structure on Linux [plan]
+## 6. Software structure on Linux [now]
+
+Everything lives in `device/generic/rootfs_overlay/duos/mnt/system/bc/` and is copied into the DuoS rootfs by
+the normal overlay mechanism (`/mnt/system/bc/`). `duo-init.sh` starts `bc-start.sh` (and no longer loads the
+Linux PWM module the RTOS owns).
 
 ```
-/usr/bin/bc-video      – wraps cvi_rtsp example: VI→VPSS→VENC→RTSP, reads /mnt/data/bc_video.json
-/usr/bin/bcd           – teleop + telemetry + params daemon (below)
-/etc/init.d/S90bc-net  – wifi (STA→AP fallback), power-save off, DSCP rules
-/etc/init.d/S95bc-rtos – rproc load (dev) / wait for RTOS init-done, push params
-/etc/init.d/S96bcd     – start bcd
-/etc/init.d/S97bc-video– start bc-video
+bc-start.sh   waits for /dev/cvi-rtos-cmdqu, then starts (in this order):
+bcd.py        teleop + telemetry + parameters + heartbeat + emergency path  (:8080)
+bc-net.sh     Wi-Fi: STA from /mnt/data/bc_wifi.conf, power-save off, AP fallback if hostapd exists
+bc-video.sh   bc_camera.py (select J1/J2) -> RTSP server binary found under /mnt/system/usr/...
+bcctl.py      command line tool (works with or without bcd)
+bc_shm.py     shared-memory + mailbox library;  bc_layout.py  generated layout (do not edit)
+bc_camera.py  camera probe/select;              web/index.html  the control page
 ```
 
-Start order matters: **RTOS and `bcd` first, video last**, so the robot is controllable even if the
-camera pipeline fails to start (e.g. sensor missing). A failed `bc-video` must never stop `bcd`.
+Start order matters: **RTOS and `bcd` first, video last**, so the robot is controllable even if the camera
+pipeline fails (sensor missing, no RTSP binary). `bc-video.sh` exits quietly on any failure and never touches `bcd`.
 
-### 6.1 `bcd` – balance control daemon
+### 6.1 `bcd` – balance control daemon [now]
 
-| Responsibility | Mechanism |
-|----------------|-----------|
-| Command path to RTOS | `/dev/cvi-rtos-cmdqu` ioctl `RTOS_CMDQU_SEND` with `ip_id = IP_BALANCE` ([01 §6.1](01-system-architecture.md)) |
-| Telemetry from RTOS | mmap `bc_shm` (UIO or `/dev/mem` in dev), read ring, convert units |
-| Client protocol | WebSocket on TCP 8080 (single control client at a time, others read-only) |
-| Heartbeat | `BC_CMD_HEARTBEAT` at 10 Hz; monitors `rtos_heartbeat` |
-| Safety filter | clamps speed/turn, applies accel limit, enforces *dead-man*: no client message for 300 ms → send zero target |
-| Persistence | `/mnt/data/bc_params.json`, validated against the ranges in [01 §6.4](01-system-architecture.md) |
-| Logging | rotating JSONL of the telemetry ring on SD (optional) |
+| Responsibility | Implementation |
+|----------------|----------------|
+| Command path to RTOS | `Mailbox.send()` → `ioctl(/dev/cvi-rtos-cmdqu, 0x40087201, 8-byte cmdqu_t)` with `ip_id = 8` |
+| Telemetry from RTOS | `/dev/mem` mmap of the window at `0x9FFF0000`; `TelemReader` follows the 50 Hz ring, counts lost/torn records; ~17 Hz forwarded to clients |
+| Heartbeat | every 100 ms: shm `linux_heartbeat++` **and** `BC_CMD_HEARTBEAT`, plus a `SET_TARGET` refresh |
+| Dead-man | no `ctl` frame for 300 ms → target forced to zero (client disconnect is the same case); RTOS has its own 500 ms timeout |
+| Limits | targets clamped to the live `v_max` / `w_max` (the RTOS slews and clamps again) |
+| Parameters | `push_params()`: validate (same rules as C) → write the seqlock block → `APPLY_PARAMS(seq)` → wait up to 1 s for `echo.applied_seq`; JSON persistence in `/mnt/data/bc_params.json`, loaded at start |
+| RTOS liveness | frozen `rtos_heartbeat` for 300 ms → **emergency**: clear `STBY` in the GPIOB data register through `/dev/mem`; logged once per freeze |
+| HTTP/WebSocket | built-in minimal RFC 6455 server (no third-party modules): `GET /` UI, `GET /api/status`, `/ws` |
+| Logging | not implemented (the ring is in RAM; `bcctl watch` prints it) |
 
-Implementation language: C (small, no dependencies, easy to cross-compile with the existing
-toolchain) or Python 3 (present in the image; adequate at 50 Hz). Start with Python for the protocol
-and UI, move hot paths to C only if CPU measurements demand it.
+Python 3 is in the image (`BR2_PACKAGE_PYTHON3`); CPU cost at 50 Hz is negligible. If measurements (`PERF-04`) say
+otherwise the hot paths can move to C.
 
-### 6.2 Client protocol (WebSocket, JSON text frames)
+### 6.2 Client protocol (WebSocket, JSON text frames) [now]
 
-Client → robot (20–50 Hz while a stick is active):
+Client → robot (the page sends `ctl` every 50 ms while the stick is held):
 
 ```json
-{"t":"ctl","seq":1234,"v":0.30,"w":-0.8,"dead_man":true}
+{"t":"ctl","v":0.30,"w":-0.8}
 ```
 
-`v` m/s (forward +), `w` rad/s (counter-clockwise +). Values are clamped by `bcd` to
-`v_max_mps` / `w_max_rads` and rate-limited to `acc_max_mps2` before being forwarded.
-
-Other client → robot messages:
+`v` m/s (forward +), `w` rad/s (counter-clockwise +).
 
 | Message | Fields | Effect |
 |---------|--------|--------|
-| `{"t":"arm"}`, `{"t":"disarm"}`, `{"t":"estop"}` | – | commands (acknowledged in `state` events) |
-| `{"t":"param","k":"a_kp","v":15.0}` | key, value | validated, pushed to RTOS, acked |
-| `{"t":"calib","what":"gyro"}` | – | runs gyro bias calibration (robot must be still) |
-| `{"t":"video","profile":"fpv-low"}` | – | restarts encoder with new profile |
+| `{"t":"arm"}`, `{"t":"disarm"}`, `{"t":"estop"}` | – | mailbox commands (`estop` zeroes the target first) |
+| `{"t":"param","k":"a_kp","v":15.0}` | name, value | validated, pushed, confirmed → `{"t":"param_result","ok":true,"msg":"applied seq 4"}` |
+| `{"t":"params"}` | – | current parameters in use → `{"t":"params","params":{…}}` |
+| `{"t":"save"}` | – | persist the current parameters to `/mnt/data/bc_params.json` |
+| `{"t":"calib","what":"gyro"|"trim"}` | – | calibration (RTOS must be `IDLE`, robot still / held at its balance point) |
+| `{"t":"ping","seq":n}` | – | `{"t":"pong","seq":n}` |
+
+The `{"t":"video","profile":…}` message of the original design is **not implemented** (no profile loader yet).
 
 Robot → client:
 
 ```json
-{"t":"tel","ts":123456,"pitch":0.42,"gyro":-1.3,"vl":0.01,"vr":0.02,"u":-3.1,
- "state":"BALANCING","fault":0,"cpu":11,"vbat":11.8,"rssi":-52,"lost":0}
+{"t":"tel","ts":123456,"pitch":0.42,"pitch_acc":0.40,"gyro":-1.3,"vl":0.01,"vr":0.02,"u":-3.1,
+ "state":"BALANCING","fault":"NONE","period_us":5000,"exec_us":410,"vbat":0.0,"rssi":-52,"lost":0,"rtos":true}
 ```
 
-at 20 Hz (decimated from the 50 Hz ring), plus event messages (`state`, `fault`, `param_ack`).
+plus `{"t":"state","state":…,"fault":…}` and `{"t":"param_ack",…}` events from the RTOS event ring. `vbat` is 0 until a
+battery divider/ADC is wired; `rssi` comes from `/proc/net/wireless`.
 
-Transport choice: WebSocket over TCP is acceptable for control **because the RTOS does not depend on
-it** (a stalled TCP connection only freezes the commanded velocity, which the dead-man timer turns
-into a stop). If measurements show head-of-line blocking under loss, add an optional UDP control
-channel with the same JSON/CBOR payload and sequence numbers (drop old, never retransmit).
+Transport choice: WebSocket over TCP is acceptable for control **because the RTOS does not depend on it** (a stalled
+connection only freezes the commanded velocity, which the dead-man timer turns into a stop). If measurements show
+head-of-line blocking under loss, add a UDP control channel with sequence numbers (drop old, never retransmit).
 
-### 6.3 Telemetry overlay on video (optional)
+### 6.2.1 The web page [now]
+
+`web/index.html` (served at `/`): joystick (pointer events, works on phones), arm / disarm / E-STOP, calibrate gyro /
+level trim, live state, pitch, speeds, loop timing, RSSI, a pitch plot, a parameter editor with auto-completion, and a
+note with the RTSP URL. Video is **not embedded** (browsers cannot play RTSP): open `rtsp://<robot>:554/live` in
+VLC/ffplay, or add an MJPEG/WebRTC gateway later.
+
+### 6.3 Telemetry overlay on video (optional, **not implemented**)
 
 Draw pitch, speed, state, battery and RSSI into the stream with the RGN OSD (same mechanism as
 `isp_info_osd.cpp`) so a recorded video is self-explanatory. Cost: negligible CPU, one text region
@@ -256,20 +261,20 @@ independently of the video.
 | Sustained video+telemetry throughput | video bitrate + < 100 kb/s telemetry | `iperf3`, `iw station dump` |
 | A53 CPU load for `bc-video` + `bcd` | < 60 % of one core | `top`, `/proc/stat` |
 
-## 9. Implementation tasks
+## 9. Implementation tasks and status
 
-| ID | Task | Depends on | Done when |
-|----|------|------------|-----------|
-| V0 | `bc-camera` probe/select script, reset-hold of the unused sensor, J1 (GC2083) and J2 (OV5647) validated separately, switching test | IMU moved off `MIPIRX4` |
-| V1 | Bring up camera + `rtsp_server_video` on DuoS with `fpv-med`; verify with `ffplay rtsp://…` | V0 | stable 10 min, fps and bitrate logged |
-| V2 | Validate Wi-Fi: STA connect script, `iw` power-save off, `iperf3` baseline TCP/UDP both directions | V1 optional | throughput and loss numbers recorded in `docs/balance_car/results/` |
-| V3 | Add `hostapd` to defconfig; AP bring-up script; STA→AP fallback | V2 | phone connects to robot AP, DHCP works |
-| V4 | Profile loader (`bc_video.json`) + adaptive rate | V1 | `fpv-low/med/hq` switchable at run time |
-| V5 | `bcd` skeleton: WebSocket, dead-man, telemetry from stub shm | – | works against a fake RTOS (host test, see doc 05) |
-| V6 | Web UI (single HTML page served by `bcd`): joystick, gauges, video via MJPEG `<img>` first; WebRTC gateway later | V5 | phone browser can drive and see telemetry |
-| V9 | (optional) IMX219 sensor driver + tuning for J2 | V0 |
-| V7 | OSD overlay | V1 | pitch/state visible in stream |
-| V8 | Jitter test with all of the above running | RTOS shm telemetry | `PERF-03` passes |
+| ID | Task | Status |
+|----|------|--------|
+| V0 | `bc_camera.py`: probe/select J1 (GC2083) / J2 (OV5647), copy the ini, hold the unused sensor in reset | **done**, 11 tests with fake I2C/GPIO; chip ids and the Linux GPIO base (480 for GPIOA) **unverified on hardware**; probing needs MCLK running, otherwise the preferred connector is used |
+| V1 | Camera + RTSP server on DuoS with `fpv-med`, verify with `ffplay` | `bc-video.sh` starts the first RTSP binary it finds (`/mnt/system/usr/example/rtsp_server_video`, …); **not run**, binary arguments/URL unverified |
+| V2 | Validate Wi-Fi (STA script, power-save off, `iperf3` baselines) | `bc-net.sh` written; **not run** on a board |
+| V3 | AP mode | script falls back to an own AP **if `hostapd` is installed**; `BR2_PACKAGE_HOSTAPD=y` was deliberately **not** added to the defconfigs (cannot be verified without a full SDK build; add it when you want AP mode) |
+| V4 | Profile loader + adaptive rate | **not done** |
+| V5 | `bcd`: WebSocket, dead-man, telemetry | **done**, 21 tests incl. a real WebSocket round trip and a run against the C shm code |
+| V6 | Web UI | **done** (no embedded video) |
+| V7 | OSD overlay | **not done** |
+| V8 | Jitter test with video + Wi-Fi load (`PERF-03`) | **not done** (needs hardware) |
+| V9 | IMX219 sensor driver | **not done** (optional, no SDK driver) |
 
 ## 10. Risks
 

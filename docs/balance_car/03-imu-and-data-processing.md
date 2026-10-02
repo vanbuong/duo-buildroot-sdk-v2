@@ -3,7 +3,7 @@
 Covers: how the IMU is configured and read, how raw data becomes `pitch` / `pitch-rate`, how encoder
 data becomes wheel speed / odometry, calibration, fault detection, and the numerical choices behind them.
 
-Legend: **[now]** exists in `freertos/cvitek/task/balance_car`, **[plan]** proposed, **[sim]** result
+Legend: **[now]** implemented in `freertos/cvitek/task/balance_car` (host-tested; not yet run on a DuoS), **[plan]** not implemented, **[sim]** result
 from the closed-loop simulation in `test/` (see doc 05), **[est]** to be measured.
 
 ---
@@ -40,7 +40,7 @@ flowchart TB
 
 | Item | Value | Where |
 |------|-------|-------|
-| Bus | **[now]** I2C1 on `PAD_MIPIRX4P` (SCL) / `PAD_MIPIRX4N` (SDA) – **collides with CSI lane pad 4 used by the 15-pin camera connector J2**; **[plan]** move to I2C0 (`IIC0_SCL/SDA`), see doc 01 §2.1 | `board_pins.h`, `board_pins_init()` |
+| Bus | **[now]** I2C0 on the `IIC0_SCL/SDA` pads (`BC_MPU_I2C_ID 0`, pad routing to the header still to be confirmed); I2C1 on `PAD_MIPIRX4P/N` remains selectable but **collides with CSI lane pad 4 used by the 15-pin camera connector J2**, see doc 01 §2.1 | `board_pins.h`, `board_pins_init()` |
 | Address | `0x68` (AD0 low), `0x69` if AD0 high | `BC_MPU_ADDR` |
 | Pull-ups | 2.2–4.7 kΩ to 3.3 V on SDA/SCL (breakout boards usually include them – check for 5 V-pulled modules!) | hardware |
 | Speed | DesignWare I2C master in **polled** mode, fast mode (`IC_CON_SPEED_FS`) ≈ 400 kHz | `poll_i2c.c` |
@@ -65,15 +65,15 @@ largest single contributor to the loop's execution time and it is a busy-wait. N
 | `SMPLRT_DIV` (0x19) | `0x04` | sample rate = 1 kHz / (1+4) = **200 Hz** |
 | `WHO_AM_I` (0x75) | read | 0x68 (6050), 0x70 (6500), 0x71 (9250), 0x98 accepted; other values only warn |
 
-**[plan]** changes, each with the reason:
+**[now]** register setup applied in `mpu60x0_init()` (reason in the last column; host test `mpu_init_*`):
 
-| Setting | Proposed | Reason |
+| Setting | Applied | Reason |
 |---------|----------|--------|
 | `GYRO_CONFIG` | `0x08` (±500 °/s, 65.5 LSB/°/s) | A fall or a push can exceed 250 °/s; a clipped gyro makes the estimator lie exactly when it matters. Resolution (0.015 °/s/LSB) is still far below the noise floor. Keep the scale constant in one header and derive `GYRO_LSB`. |
 | `SMPLRT_DIV` | `0x00` (1 kHz internal output) | The loop reads asynchronously at 200 Hz; with the sensor's own 200 Hz clock there is a beat pattern (repeated or skipped samples, up to 5 ms extra age). Reading a 1 kHz output makes the age ≤ 1 ms and the DLPF still limits bandwidth. |
-| `CONFIG` | `0x02` (98 Hz) *or keep 0x03* | 42 Hz DLPF adds ≈ 5 ms delay to `ω`, which is a substantial fraction of the loop's phase budget (PD crossover ≈ 3 Hz in the model, doc 04). Choose by experiment: 98 Hz if vibration allows. Motor/gear vibration is the deciding factor. |
+| `CONFIG` | **kept `0x03` (42 Hz)**; `0x02` (98 Hz) is a tuning experiment, not applied | 42 Hz DLPF adds ≈ 5 ms delay to `ω`, which is a substantial fraction of the loop's phase budget (PD crossover ≈ 3 Hz in the model, doc 04). Choose by experiment: 98 Hz if vibration allows. Motor/gear vibration is the deciding factor. |
 | MPU6500 only: `ACCEL_CONFIG2` (0x1D) | `0x03` (≈ 44 Hz accel DLPF) | On the 6500 the accel DLPF is a *separate* register that the current code never writes, so accel runs with a much wider bandwidth than the 6050 path. Gate by `WHO_AM_I == 0x70/0x71` (and 0x98 variants). |
-| Interrupt | `INT_PIN_CFG`/`INT_ENABLE` data-ready on a spare GPIO (optional) | Lets the ISR timestamp the sample exactly. The simpler alternative is the 1 kHz output above. |
+| Interrupt | **not implemented** (the 1 kHz output makes the sample ≤ 1 ms old, which is enough) – data-ready on a spare GPIO is optional | Lets the ISR timestamp the sample exactly. The simpler alternative is the 1 kHz output above. |
 | Temperature | read bytes 6–7 (already in the burst) | Used for gyro bias drift monitoring (§5.3). |
 
 Keep reading the whole 14-byte block: accel (6) + temp (2) + gyro (6) in one transaction guarantees the
@@ -93,13 +93,12 @@ Verified by host unit test `mpu_read_decodes_big_endian_signed` (doc 05).
 ### 2.4 Axes, signs and mounting
 
 The estimator computes `θ_acc = atan2(−ax, √(ay²+az²))` and integrates `gyro_y`. For a different mounting
-only a constant axis map changes; make it explicit **[plan]**:
+only the sign/axis choice changes. **[now]** the sign is the run-time parameter `imu_sign` (±1, flips angle and rate together); a full axis remap is **not implemented** – it would be a compile-time change in `estimator.c` / `mpu60x0_scale`:
 
 ```c
-#define BC_IMU_PITCH_AXIS_ACC   (-ax)          /* which accel axis points along travel */
-#define BC_IMU_PITCH_AXIS_GYR   ( gy)          /* gyro axis for pitch rate            */
-#define BC_IMU_YAW_AXIS_GYR     ( gz)          /* for turning                         */
-#define BC_IMU_SIGN             (+1)           /* flips both angle and rate           */
+/* estimator.c today: pitch from X/Z accel and the Y gyro, yaw rate from the Z gyro */
+acc_pitch = imu_sign * atan2f(-ax, sqrtf(ay*ay + az*az)) * RAD2DEG;
+rate      = imu_sign * gyro_y - bias;
 ```
 
 Consistency rule (this is the single most common bring-up bug): **accel-derived angle and gyro rate must
@@ -125,15 +124,15 @@ Host tests prove it converges (`mpu_filter_converges_to_accel_tilt`) and integra
    car's own acceleration**. When the motors push at 90 % the wheels accelerate (≈ 4–5 m/s² in the
    assumed model) and the accel-derived angle is off by up to `atan(a/g) ≈ 25°` **[est]**. With
    `1-α = 2 %` this leaks into θ within ≈ 0.25 s, and because the error is *correlated with the motor
-   command* it behaves like positive feedback. **[sim]**: with the shipped `α = 0.98` and
-   `Kp = 25` the simulated car falls within ≈ 0.35 s (plant gain 0.05 m/s²/%, test
-   `sim_KNOWN_DEFECT_shipped_filter_falls_even_without_speed_loop`; the design-time scan below shows the
-   same for the other plant gains).
+   command* it behaves like positive feedback. **[sim]**: with the *first* firmware version's `α = 0.98`, no gate and
+   `Kp = 25` the simulated car falls within ≈ 0.35 s (plant gain 0.05 m/s²/%; kept as the rationale test
+   `sim_rationale_low_alpha_without_gate_falls`; the design-time scan below shows the same for the other plant
+   gains). That version is replaced by the estimator of §3.2.
 2. **Constant `dt`.** Real period is `tick-phase + printf + I2C`; integration error ≈ `ω·Δt`.
 3. **Initial condition `θ = 0` and no bias tracking.** At boot the angle starts at 0 and takes ≈ τ to
    find the real tilt; gyro bias is measured once.
 
-### 3.2 [plan] recommended: gated complementary filter with bias tracking
+### 3.2 Gated complementary filter with bias tracking [now – `src/estimator.c`]
 
 ```
 ω   = gyro_y_dps − b                           (b = bias estimate)
@@ -149,7 +148,7 @@ else :  θ   = θ⁻                               (gyro only)
 Parameters: `α = 0.998`, gate `G = 0.10 g`. **[sim]** results from the design-time parameter scans
 (angle loop only, speed loop off, wheel acceleration leaking into the simulated accelerometer, four plant
 gains 0.02 / 0.05 / 0.1 / 0.2 m/s² per %, Kd = 0.8). The scans were exploratory and are not kept as tests;
-the regression tests pin only the shipped and the recommended configuration.
+the regression tests cover the default (recommended) configuration and the α 0.98 / no-gate counter-example.
 
 | Configuration | Result (cases balanced out of 4 plant gains, per Kp) |
 |---------------|-------------------------------------------------------|
@@ -160,7 +159,7 @@ the regression tests pin only the shipped and the recommended configuration.
 | **`α = 0.998` + gate 0.1 g, Kp 15** | **4/4**, steady lean ≤ 2.0° (limit cycle from the 6 % motor deadband) |
 
 Take-away: a larger gyro weight is what matters most; the gate adds margin for aggressive gains. The
-shipped combination (`α = 0.98`, `Kp = 25`, no gate) is the *worst* corner of this table. The conclusion
+first version's combination (`α = 0.98`, `Kp = 25`, no gate) was the *worst* corner of this table. The conclusion
 depends on the assumed plant (§3.1 item 1) and must be confirmed on the real car (tests `HIL-05`,
 `FLD-01`).
 
@@ -172,7 +171,7 @@ accelerometer is the long-term reference; the design goal is to *use it slowly a
 
 Cost: ≈ 25 flops + one `atan2f`, `sqrtf` – a few µs on the C906 FPU **[est]**; negligible next to the I2C read.
 
-### 3.3 [plan, optional] 2-state Kalman filter (angle + gyro bias)
+### 3.3 2-state Kalman filter (angle + gyro bias) – **not implemented**, optional
 
 State `x = [θ, b]ᵀ`, input `u = ω_meas`:
 
@@ -235,14 +234,14 @@ Example **[est]**: motor shaft at 6 000 rpm, 11 PPR ×4 → 4.4 kHz edge rate �
 I2C window misses ≈ 2 edges per control cycle. That systematic loss shows up as a *speed-dependent scale
 error*, which is invisible at standstill and wrecks the speed loop at speed.
 
-**[plan]** use edge interrupts on A (both edges) for each wheel (PLIC GPIO interrupt; the current GPIO
+**[now]** (`src/enc_irq.c`, `BC_ENC_USE_IRQ 1`): edge interrupts on A and B (both edges) for each wheel (PLIC GPIO interrupt; the current GPIO
 helper has no IRQ support → extend `gpio.c`), with an ISR body that reads A and B, applies the LUT
 and increments a counter (≤ 2 µs). Alternatives if GPIO IRQs prove awkward: a 10–20 kHz timer ISR that
 polls (deterministic, still loses nothing as long as the sample rate ≥ 4× max edge rate), or
 reading the I2C sensor from a lower-priority context. Acceptance: **no count loss** in the bench test with
 a signal generator at the maximum edge rate (test `HIL-02`).
 
-### 4.4 Wheel speed and odometry [plan]
+### 4.4 Wheel speed and odometry [now: speed; plan: odometry]
 
 ```
 Δc_L = cL[k] − cL[k−1]              (int32 subtraction is wrap-safe)
@@ -259,32 +258,33 @@ unusual (`SPEED_KP 0.05 °` per count/s). Converting to m/s makes gains physical
 
 ## 5. Calibration
 
-### 5.1 Gyro bias at boot **[now, to harden]**
+### 5.1 Gyro bias at boot [now – `mpu60x0_calibrate()`]
 
-`mpu60x0_calibrate_gyro(imu, 200)` averages 200 samples × 5 ms = **1 s** of `gy` only (host test
-`mpu_gyro_bias_calibration_removes_offset`: 1.5 °/s offset removed, residual angle drift < 0.05°).
-Hardening **[plan]**:
+`mpu60x0_calibrate(imu, 200)` averages 200 samples × 5 ms = **1 s** of all three gyro axes and the accelerometer
+(host tests `mpu_calibration_*`):
 
-* calibrate all three gyro axes (yaw rate is used for turning);
-* **reject** if variance of any axis exceeds a threshold (≈ 0.5 °/s RMS **[est]**) or `‖a‖` is not
-  within 1 ± 0.05 g – robot was moving; retry up to 3× then `FAULT`;
-* store result in the shm calibration block so Linux can display and persist it;
-* run again on the `BC_CMD_CALIBRATE` command while DISARMED.
+* bias for **x, y, z** (yaw rate is used by the turn loop);
+* **rejects** the calibration (`-2`, no partial result kept) if any gyro axis has RMS > 1 °/s or the mean `‖a‖` is
+  outside 1 ± 0.1 g – the robot was moving; the state machine then goes to `FAULT_CALIB`, and a repeat can be
+  requested after `DISARM` + `BC_CMD_CALIBRATE`;
+* runs at boot and again on `BC_CMD_CALIBRATE(1)` while `IDLE`;
+* the result lives in `mpu60x0_t` (`gyro_bias[3]`, `accel_mean[3]`); it is **not** yet exported through the shm
+  calibration block (reserved), only the event ring records success/failure.
 
 ### 5.2 Level trim (centre-of-gravity offset)
 
-The mechanical balance point is rarely at `θ = 0` (battery position, IMU mounting angle). Procedure
-**[plan]**:
+The mechanical balance point is rarely at `θ = 0` (battery position, IMU mounting angle). Procedure [now]:
 
 1. Hold the car at the angle where it feels balanced (hands off briefly, or on the stand), send
-   `BC_CMD_CALIBRATE(2)`; the RTOS averages `θ` for 1 s and stores `trim_deg`.
+   `BC_CMD_CALIBRATE(2)` (`bcctl calib trim`, web button); the RTOS (state `IDLE`) averages `θ` for 1 s and writes
+   `trim_deg` into its parameter set (rejected if |trim| > 15°); `bcctl save` persists it.
 2. The angle loop uses `θ_set = trim + speed-loop output`.
 3. The speed-loop integral (doc 04) removes small residual errors automatically.
 
 ### 5.3 Drift monitoring
 
-Log `temp`, `gyro_bias` and `trim` every minute; warn when bias moves > 1 °/s from the boot value (sensor
-warm-up). Optional online bias tracking is part of the filter in §3.2/3.3.
+**Not implemented** (temperature is read but not logged). Online bias tracking is part of the filter (§3.2): `bias` in the
+estimator follows slow drift while the accel gate is open and |rate| < 15 °/s.
 
 ### 5.4 Accelerometer offsets
 
@@ -293,26 +293,24 @@ if the accel norm gate regularly rejects a still robot; then store `offset[3]` a
 
 ## 6. Fault detection and recovery
 
-| Check | Rule | Action |
+| Check | Rule | Status |
 |-------|------|--------|
-| WHO_AM_I | not in {0x68, 0x70, 0x71, 0x98} | boot warning (today); `FAULT` unless `ALLOW_UNKNOWN_IMU` |
-| I2C error | `poll_i2c_read` ≠ 0 | reuse last sample ≤ 2 cycles, then coast + `FAULT_IMU_BUS` **[now: `continue` – no coast, keeps last PWM!]** |
-| Stuck data | 14-byte frame identical ×20 | `FAULT_IMU_STUCK` |
-| Saturation | `|raw gyro| ≥ 32 700` for > 3 cycles | `FAULT_IMU_RANGE` |
-| Accel norm | `‖a‖ ∉ [0.5, 1.5] g` for > 100 ms | warn, gyro-only; fault after 500 ms |
-| Spikes | `|θ[k] − θ[k−1]| > 10°` in one cycle | reject sample, count |
-| Bus recovery | after 3 consecutive errors: toggle SCL 9× as GPIO, issue STOP, re-init I2C + sensor | automatic once; then `FAULT` |
-| Re-init | on `BC_CMD_DISARM` + `BC_CMD_CALIBRATE` | clears the fault if sensor answers |
+| WHO_AM_I | not in {0x68, 0x70, 0x71, 0x98} | boot warning only (continues) |
+| I2C error | `poll_i2c_read` ≠ 0 | **[now]** reuse the last sample for ≤ 2 cycles, 3 consecutive errors → `FAULT_IMU_BUS` → coast, `STBY = 0` (`bc_imu_health`, host tests `FLT-04`, sim `sim_imu_unplug_coasts_within_four_cycles`) |
+| Stuck data | 14-byte frame identical ×20 | **[now]** `FAULT_IMU_STUCK` |
+| Saturation | `|raw gyro| ≥ 32 700` for > 3 cycles | **[now]** `FAULT_IMU_RANGE` |
+| Accel norm | `‖a‖ ∉ [0.5, 1.5] g` for > 100 ms / 500 ms | **[now]** warn flag at 100 ms, `FAULT_IMU_RANGE` at 500 ms (the estimator's gate separately ignores the accelerometer when `|‖a‖−1| > 0.1 g`) |
+| Spikes | `|θ[k] − θ[k−1]| > 10°` in one cycle | **not implemented** |
+| Bus recovery | toggle SCL 9× as GPIO, re-init | **not implemented** (the fault stays until `DISARM` + a good read; `poll_i2c` has a timeout so the task cannot hang) |
+| Re-init | on `DISARM` | clears the fault if the sensor answers again |
 
-Note on **[now]** behaviour: on a failed read the loop executes `continue` *before* the motor update,
-so the motors keep the **previous duty** with a stale angle. This is the highest-priority safety fix in
-the roadmap (item S1 in doc 06).
+The earlier firmware executed `continue` before the motor update on a failed read (stale PWM); that is fixed: the state
+machine leaves `BALANCING` and the actuator step forces coast.
 
 ## 7. Numerical and implementation notes
 
 * Use `float` (the C906L has the D extension); keep `atan2f`/`sqrtf` out of ISRs.
-* `mpu60x0_t` holds both raw ints and the angle; split into `imu_raw_t`, `imu_cal_t`, `attitude_t`
-  **[plan]** so the pure math (estimator, calibration statistics) has no I2C dependency and runs on the host.
+* The math is split from the driver [now]: `mpu60x0.c` (I2C, scaling, calibration) → `estimator.c`, `control.c`, `bc_state.c`, `imu_health.c`, `bc_core.c` (pure, no I2C, host-tested).
 * Keep scale constants (`ACCEL_LSB`, `GYRO_LSB`) derived from the configured range in one place; the host
   test for `GYRO_CONFIG` should assert both the register value and the LSB constant (prevents a silent
   factor-of-two when the range is changed).
@@ -323,9 +321,10 @@ the roadmap (item S1 in doc 06).
 
 | Behaviour | Test |
 |-----------|------|
-| Register init values, WHO_AM_I, burst decode, I2C error propagation | `mpu_init_accepts_known_who_am_i`, `mpu_read_decodes_big_endian_signed`, `mpu_read_propagates_i2c_error` |
-| Filter convergence and gyro integration | `mpu_filter_converges_to_accel_tilt`, `mpu_gyro_integrates_between_accel_corrections` |
-| Gyro bias calibration and failure path | `mpu_gyro_bias_calibration_removes_offset`, `mpu_calibration_fails_cleanly_on_bus_error` |
+| Register setup (6050 / 6500), scale constants, decode, bus error, scaling | `mpu_init_6050_register_setup`, `mpu_init_6500_sets_accel_dlpf`, `mpu_scale_constants_match_register_setup`, `mpu_read_*`, `mpu_scale_applies_bias_and_units` |
+| Calibration: 3-axis bias, motion rejected, bad gravity rejected, bus error | `mpu_calibration_*` (4 tests) |
+| Estimator: init from accel, convergence, gyro integration, accel gate, zero vector, bias tracking, sign | `est_*` (8 tests, `EST-01..04`) |
+| IMU health: stuck, saturation, norm window, bus-error policy | `health_*` (5 tests, `FLT-01..04`) |
 | Quadrature decode | six `encoder_*` tests |
-| Contaminated-accel behaviour, recommended estimator | closed-loop `sim_*` tests (the reference estimator is in `test_sim.c`; move it to `src/` when implemented) |
-| Not yet covered (planned): gate logic in `src/`, Kalman, stuck-data and range faults, bus recovery | unit tests `EST-*`, `FLT-*` in doc 05 |
+| End-to-end through the fake I2C register file: wheel acceleration leaking into the accelerometer, noise, push, unplug | closed-loop `sim_*` tests (real `bc_core` + real MPU driver) |
+| Not covered: Kalman (not implemented), spike filter, bus recovery, encoder IRQ on hardware (`HIL-02`) | – |

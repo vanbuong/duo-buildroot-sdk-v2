@@ -27,38 +27,50 @@ Existing firmware: `freertos/cvitek/task/balance_car` (MPU6050/6500, TB6612FNG, 
 
 Rule: **the robot must stay upright with Linux hung or Wi-Fi gone.** Linux only sends setpoints.
 
-## Key findings (details in docs 03, 04, 06)
+## Implementation status
 
-1. **The shipped control constants do not balance in simulation.** The speed loop is positive feedback for the
-   firmware's angle convention and ~500× too large in counts/s units; the 0.98 complementary filter lets the
-   car's own acceleration corrupt the angle. A simulation that runs the real `pid.c`/`mpu60x0.c` shows both. A
-   corrected configuration (gated filter α = 0.998, `Kp 15`, `Kd 0.8`, speed loop `−1.94 °/(m/s)`) balances
-   across a 10× range of assumed plant gains. *The plant is a model with assumed parameters – confirm on
-   hardware.*
-2. **Safety gaps:** an IMU read error leaves the motors at their last PWM; boot arms immediately; if the RTOS
-   stops the PWM block keeps running. Fixes and tests are specified (S1–S3, SAF-08).
-3. **Real-time structure:** busy-wait control loop on the 200 Hz tick, `printf` in the loop, and encoder polling
-   that is blind during the 0.4 ms I2C read. Target: timer-driven task, edge-interrupt encoders, console task.
-4. **Resource conflicts:** the Linux DTS enables I2C1 and `duo-init.sh` loads the PWM module – both used by the
-   RTOS. The IMU pads (`PAD_MIPIRX4P/N`) are CSI lane pad 4, used by the 15-pin camera connector, so the IMU
-   moves to I2C0. `VIVO_D0..D8` overlap with Linux I2C4 (touch) / SPI3.
-5. **Two cameras, one at a time:** J1 16-pin GC2083 (I2C3, MCLK0) and J2 15-pin OV5647 (I2C2, MCLK1); boot-time
-   probe/select, unused sensor held in reset. IMX219 has no driver in the SDK (optional port).
-6. **No Linux↔RTOS interface exists yet.** Design: new `IP_BALANCE` mailbox id for 32-bit commands + a 64 KiB
-   shared-memory window with seqlock telemetry ring, double-buffered parameters and heartbeats.
+Everything below is **implemented in this branch and verified on GitHub CI** (all 31 checks green on the last pushed head,
+including the full SDK image builds for every board) **but has never run on a DuoS board.** Hardware-dependent items are listed
+under "Not done".
 
-## What this branch contains
+| Area | Status | Verified by |
+|------|--------|-------------|
+| Control core: params, gated estimator, cascaded controller, state machine, IMU health, command watchdog | done | 107 host tests / 513 checks (gcc, gcc+ASan/UBSan, clang), coverage 90–100 % per file |
+| Closed-loop simulation through the real core + MPU driver | done | `test_sim.c` (assumed plant!) |
+| RTOS firmware: blocking 200 Hz control task, IRQ encoders, IMU on I2C0, boot→IDLE, coast on fault, console task | done | real RTOS image builds in CI (cv181x with balance, cv180x without); **not run on hardware** |
+| Linux↔RTOS interface: `IP_BALANCE`, 64 KiB shared window (linker-asserted), seqlock rings, parameter block | done | host stress tests + Python↔C interop tests |
+| Linux side: `bcd` (teleop, heartbeat, dead-man, parameters, emergency STBY clear), `bcctl`, web UI | done | 57 Python tests incl. WebSocket round trip |
+| Two cameras, one at a time (`bc_camera.py`) | done | tests with fake I2C/GPIO; chip ids unverified |
+| Resource ownership: PWM module no longer loaded, `&i2c4`/`&spi3` disabled in the four DuoS DTS | done | `dtc` compile in CI |
+| CI: unit, coverage, pytest, layout drift, RTOS image, DTS, docs | done | green on GitHub |
 
-| Item | Status |
-|------|--------|
-| Design documents 01–06 | written |
-| Host unit tests + closed-loop simulation (`freertos/cvitek/task/balance_car/test`) | **30 tests / 78 checks pass** (gcc, gcc+ASan/UBSan, clang; coverage `pid`/`encoder` 100 %, `mpu60x0` ≈ 88 %) |
-| CI workflow `.github/workflows/balance-car-tests.yml` | written, verified locally; first GitHub run pending |
-| Firmware behaviour | **unchanged** (findings are documented and pinned by `*_KNOWN_DEFECT_*` tests) |
+### Not done (needs hardware or a decision)
 
-Run the tests: `make -C freertos/cvitek/task/balance_car/test test`
+* **Everything on real hardware:** HIL, system and field tests ([05](05-test-plan-and-ci.md) §4–6), system identification
+  and gain tuning (the defaults come from an *assumed* plant), the video/Wi-Fi jitter test (`PERF-03`).
+* **Unverified assumptions:** the IIC0 pads reach the DuoS header (else set `BC_MPU_I2C_ID 1` and lose J2); GPIO IRQ number 42
+  and the DW GPIO register use for the encoders (fallback: `BC_ENC_USE_IRQ 0`); camera chip ids and Linux GPIO numbering;
+  the RTSP binary/arguments in `bc-video.sh`; that the PWM block keeps its last state if the RTOS dies (the emergency STBY clear
+  is implemented for it).
+* **Not implemented:** hardware e-stop/STBY supervisor and battery sense (hardware), Kalman filter, odometry/position hold,
+  I2C bus-recovery, spike filter, CPU-load measurement, video profiles/adaptive bitrate/OSD, embedded video in the web page,
+  IMX219 sensor driver, `hostapd` in the Buildroot defconfig, mailbox events RTOS→Linux (off by default, ring is used),
+  hardware-timer-paced control (tick-paced today), HIL nightly runner.
+
+## Key findings (history; details in docs 03, 04, 06)
+
+1. **The first firmware version's control constants could not balance in simulation** (speed loop positive feedback and ~500× too
+   large in counts/s; 0.98 filter corrupted by the car's own acceleration). Replaced by the m/s speed loop and the gated filter;
+   a corrected configuration balances across a 10× range of *assumed* plant gains.
+2. **Safety gaps** (stale PWM after an IMU error, arming at boot, runaway if the RTOS stops) are closed in software; the last one
+   still needs a hardware supervisor for full coverage.
+3. **Real-time structure** (busy-wait loop, `printf` in the loop, encoders blind during I2C) replaced by a blocking task, a console
+   task and edge interrupts.
+4. **Resource conflicts** (Linux owned I2C1, PWM, I2C4/SPI3 pads; IMU pads blocked the 15-pin camera) resolved by moving the IMU to
+   I2C0 and releasing the Linux side.
+5. **Two cameras, one at a time:** J1 16-pin GC2083 (I2C3, MCLK0) / J2 15-pin OV5647 (I2C2, MCLK1); IMX219 has no SDK driver.
 
 ## Conventions in these documents
 
-* **[now]** exists in the tree · **[plan]** proposed · **[est]** estimate to be measured · **[sim]** simulation result.
+* **[now]** implemented in this branch · **[plan]** not implemented · **[est]** estimate to be measured · **[sim]** simulation result.
 * Numbers marked **[est]** are not measurements. Nothing here was run on a DuoS board.

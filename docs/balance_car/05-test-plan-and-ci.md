@@ -43,104 +43,74 @@ laptop or in CI, and keeping hardware time for what only hardware can show.
    thin `timer_us()` wrapper.
 4. **Each safety rule has a test that makes it fire.** A safety feature without a test that triggers it is
    considered unimplemented.
-5. **Known defects are pinned, not hidden.** Tests named `*_KNOWN_DEFECT_*` assert the current (wrong)
-   behaviour and carry a comment pointing to the fix; fixing the code intentionally breaks them and the
-   author flips/deletes them in the same commit.
+5. **Counter-examples are kept.** Tests such as `sim_rationale_low_alpha_without_gate_falls`,
+   `sim_wrong_encoder_sign_runs_away_or_falls` and `sim_speed_gain_magnitude_limit` assert that a *wrong*
+   configuration fails, so the design rationale in docs 03/04 stays executable. (The `*_KNOWN_DEFECT_*` tests that
+   pinned the first firmware version were removed when its defects were fixed.)
 
 ## 3. L1–L3 – host tests **[now]**
 
-Location: `freertos/cvitek/task/balance_car/test/`
+Location: `freertos/cvitek/task/balance_car/test/` (C) and `.../linux_tests/` (Python).
 
 ```
 test/
-├── Makefile              make test | make test SAN=1 | make coverage
+├── Makefile              make test | make test SAN=1 | make coverage | make tools | make pytest
 ├── unity_lite.h          CHECK / CHECK_NEAR / CHECK_EQ, RUN()
-├── stubs/                printf.h delay.h  fake_hw.{h,c}   (GPIO levels, I2C register file, fault injection)
+├── stubs/                printf.h delay.h  fake_hw.{h,c}   (GPIO levels, I2C register file, read hook, fault injection)
 ├── sim_plant.{h,c}       wheeled inverted pendulum + motor deadband/lag (ASSUMED parameters)
-├── test_pid.c  test_encoder.c  test_mpu.c  test_sim.c  test_main.c
+├── test_pid.c test_encoder.c test_mpu.c test_params.c test_estimator.c test_control.c
+├── test_state.c test_health_cmd.c test_shm.c test_sim.c test_main.c
+├── layout_dump.c         prints the C compiler's view of every shared offset (for the Python cross-check)
+└── shm_tool.c            plays the RTOS side of the shared window on a file, using the real bc_shm.h
+linux_tests/              test_layout.py test_shm_interop.py test_bcd.py test_camera.py test_bcctl_scripts.py
+tools/                    gen_bc_layout.py  rtos_build_check.sh  dts_check.sh
 ```
 
-Run: `make -C freertos/cvitek/task/balance_car/test test` (no dependencies beyond a C compiler and libm).
-Current result: **30 tests, 78 checks, 0 failures**; also clean under AddressSanitizer + UBSan (gcc);
-coverage `pid.c` 100 %, `encoder.c` 100 %, `mpu60x0.c` ≈ 88 % (uncovered: the unknown-WHO_AM_I warning path).
+Run: `make -C freertos/cvitek/task/balance_car/test test` (needs only a C compiler and libm/pthread) and `… pytest`.
+Current result: **107 C tests / 513 checks and 57 Python tests, all passing**; clean under AddressSanitizer + UBSan (gcc);
+line coverage `pid` 92 %, `encoder` 100 %, `mpu60x0` 91 %, `bc_params` 96 %, `estimator` 97 %, `control` 99 %, `bc_state` 99 %,
+`imu_health` 100 %, `bc_cmd` 100 %, `bc_core` 90 %.
 
-### 3.1 Inventory
+### 3.1 C inventory (107 tests)
 
-| ID | Test | What it proves |
-|----|------|----------------|
-| UT-PID-01 | `pid_p_only_is_proportional` | `out = Kp·(sp − meas)` |
-| UT-PID-02 | `pid_output_is_clamped` | asymmetric limits respected |
-| UT-PID-03 | `pid_integral_accumulates_and_is_clamped` | `∫e dt` rate, saturation at `i_max`, recovers after sign reversal (anti-windup bound) |
-| UT-PID-04 | `pid_derivative_acts_on_error_change` | D term magnitude and decay |
-| UT-PID-05 | `pid_setpoint_step_causes_derivative_kick` | **pins defect C5** (derivative on error) |
-| UT-PID-06 | `pid_reset_clears_state` | integrator and previous error reset |
-| UT-PID-07 | `pid_nonpositive_dt_is_safe` | no NaN/inf for `dt ≤ 0` |
-| UT-ENC-01 | `encoder_counts_4x_per_cycle_forward` | 4 counts per quadrature cycle, sign convention |
-| UT-ENC-02 | `encoder_direction_is_signed` | up/down counting is symmetric |
-| UT-ENC-03 | `encoder_no_motion_no_counts` | no spurious counts over 1000 polls |
-| UT-ENC-04 | `encoder_jitter_is_cancelled` | contact bounce nets the right count |
-| UT-ENC-05 | `encoder_skipped_state_is_dropped` | illegal transition counts 0 (**documents the under-sampling failure mode**, doc 03 §4.3) |
-| UT-ENC-06 | `encoder_reset_zeroes_count` | reset |
-| UT-MPU-01 | `mpu_init_accepts_known_who_am_i` | register writes: `PWR_MGMT_1=1`, `CONFIG=3`, gyro/accel ±250 dps/±2 g |
-| UT-MPU-02 | `mpu_read_decodes_big_endian_signed` | byte order, sign, full-scale −32768 |
-| UT-MPU-03 | `mpu_read_propagates_i2c_error` | bus error → non-zero return |
-| UT-MPU-04 | `mpu_filter_converges_to_accel_tilt` | steady state at +10°, −25°, 0° within 0.1° |
-| UT-MPU-05 | `mpu_gyro_integrates_between_accel_corrections` | gyro-only lag = ω·τ (≈ 24.5° at 100 °/s) |
-| UT-MPU-06 | `mpu_gyro_bias_calibration_removes_offset` | 1.5 °/s offset → residual drift < 0.05° over 10 s |
-| UT-MPU-07 | `mpu_calibration_fails_cleanly_on_bus_error` | no hang, error returned |
-| SIM-01 | `sim_recommended_balances_across_plant_gains` | recommended gains/estimator hold for plant gain 0.02…0.2 m/s²/% (0.4×…4×), lean ≤ 12°, steady lean < 3°, drift < 1.5 m in 15 s |
-| SIM-02 | `sim_recommended_tolerates_sensor_noise` | accel ±0.03 g, gyro ±0.5 °/s uniform noise |
-| SIM-03 | `sim_recommended_recovers_from_push` | 0.6 rad/s (34 °/s) impulse at t = 2 s |
-| SIM-04 | `sim_recommended_starts_from_larger_lean` | released at 12° |
-| SIM-05 | `sim_wrong_speed_sign_diverges` | guards the sign convention (doc 04 §7) |
-| SIM-06 | `sim_speed_loop_stable_up_to_4_deg_per_mps` | speed-loop gain upper bound |
-| SIM-07 | `sim_speed_gain_magnitude_matters_not_just_sign` | `−0.05` (right sign, shipped size) still diverges |
-| SIM-08 | `sim_KNOWN_DEFECT_shipped_config_falls` | **pins defects C1+C2**: shipped `balance_main.c`/`mpu60x0.c` configuration falls |
-| SIM-09 | `sim_KNOWN_DEFECT_shipped_speed_gains_fall_even_with_good_estimator` | isolates C1 |
-| SIM-10 | `sim_KNOWN_DEFECT_shipped_filter_falls_even_without_speed_loop` | isolates C2 |
+| Suite | Tests | What it proves | Plan IDs |
+|-------|-------|----------------|----------|
+| `test_pid.c` (10) | proportional, clamp, integral + anti-windup, derivative, **setpoint kick (documents the generic form)**, reset, dt guard, **rate-form (no kick)**, **rate-form P/clamp**, **I-limit in output units + freeze** | PID mathematics | `UT-PID-01..07`, `CTL-01`, `CTL-03` |
+| `test_encoder.c` (6) | 4× decode, signed counting, no spurious counts, bounce, **skipped state dropped (the under-sampling failure mode)**, reset | quadrature decode | `UT-ENC-01..06` |
+| `test_mpu.c` (10) | 6050/6500 register setup (±500 °/s, 1 kHz, `ACCEL_CONFIG2`), scale constants tied to the registers, big-endian decode, bus error, scaling + bias, 3-axis calibration, **motion rejected, bad gravity rejected**, calibration bus error | IMU driver | `UT-MPU-*` |
+| `test_params.c` (7) | defaults valid, **every field rejects out-of-range/NaN**, set-by-name, sign fields ±1 only, first-bad-field report, dense 32-bit layout, CRC-32 vector | parameter set | `SHM-03` (C side) |
+| `test_estimator.c` (8) | init from accel, convergence, gyro integration, **accel gate**, zero vector finite, **bias tracking**, bias frozen while gated, sign flip | estimator | `EST-01..04` |
+| `test_control.c` (13) | counts→m/s, slew, deadband table, zero drive upright, **angle PD formula + sign**, trim, saturation, **speed loop leans back when moving forward**, encoder sign, target clamp/slew, turn, **mixer keeps balance drive over turn**, reset | controller | `CTL-01..06` |
+| `test_state.c` (21) | calibration/arming flow, 1 s upright window and restart, timeout, refusal with IMU fault, fall, fallen recovery, each IMU fault, fault needs clean sensor, saturation (long vs short), lift (and *not* lift while leaning), timing fault, **ESTOP latch**, disarm, motors only in BALANCING, names | state machine | `ST-01`, `ST-02`, `SAF-01/04/05/07` (logic) |
+| `test_health_cmd.c` (11) | stuck frame, gyro saturation, norm window, bus-error policy, target pack/unpack, state pack, clamp, **watchdog zeroes targets (never disarms)**, stale target, hb-disarm + wraparound | `imu_health`, `bc_cmd`, `bc_proto` | `FLT-01..04`, `CMD-01/02` |
+| `test_shm.c` (11) | header written last, layout offsets + cache-line separation, telemetry round trip/order, **wrap → lost**, corruption/torn detection, events, parameter block round trip + rejection, echo, **two-thread seqlock stress (300 000 records, 0 torn deliveries)**, parameter pair coupling stress | shared memory | `SHM-01..03` |
+| `test_sim.c` (10) | start-up sequence + 1 s arming, **balances for plant gain 0.4×…4×**, sensor noise, push recovery, 12° start, speed gain ≤ 4 °/(m/s) stable, **magnitude limit**, **wrong encoder sign diverges**, **α 0.98 without gate falls**, **IMU unplug → coast within 4 cycles, motor 0** | closed loop through the real `bc_core` and MPU driver | `SIM-01..`, `HIL-06` (sim) |
 
-How the simulation is wired: the test loop mirrors `balance_ctrl_task()` (200 Hz): it writes the plant's
-accelerometer/gyro values into the **fake I2C register file**, calls the *real* `mpu60x0_read()` and
-`mpu60x0_update_angle()`, feeds encoder counts through the same `Δcounts/dt` formula, runs the *real*
-`pid_update()` twice, and applies the result to the plant with a 20 ms actuator lag and a 6 % deadband. So
-what is tested is the firmware's own arithmetic, not a re-implementation – except the **reference
-estimator** (`est_update()` in `test_sim.c`), which is the planned replacement and moves into `src/` with
-its own unit tests when implemented (§3.2).
+How the simulation is wired: the test loop mirrors `balance_ctrl_task()` (200 Hz). It writes the plant's accelerometer and
+gyro values into the **fake I2C register file** (the accelerometer includes the wheel acceleration), calls the *real*
+`mpu60x0_read()`/`mpu60x0_scale()`, feeds raw encoder counts, and runs the *real* `bc_core_step()` – including health
+monitor, estimator, state machine and controller. The "hand holds the car upright while arming, then lets go at a
+lean" start is modelled explicitly.
 
-Limits of the simulation (be honest about them): the plant parameters are assumptions, there is no motor
-back-EMF model, no wheel slip, no I2C/printf timing, and the pitch dynamics are linear-plus-`sin`. Passing
-SIM tests means "the structure and signs are right and there is margin in the *model*", not "the car will
-balance". Hence the system-identification step in doc 04 §12 and the HIL/field levels below.
+Limits of the simulation (be honest about them): the plant parameters are assumptions, there is no motor back-EMF
+model, no wheel slip, no I2C/printf timing, and the pitch dynamics are linear-plus-`sin`. Passing SIM tests means "the
+structure and signs are right and there is margin in the *model*", not "the car will balance". Hence the
+system-identification step in doc 04 §12 and the HIL/field levels below.
 
-### 3.2 Unit tests to add together with the planned code **[plan]**
+### 3.2 Python inventory (57 tests)
 
-| ID | Module | Assertions |
-|----|--------|-----------|
-| EST-01 | gated complementary filter in `src/` | accel norm gate rejects 1.2 g sample; α/τ; gyro-only fallback; no NaN with ‖a‖ = 0 |
-| EST-02 | bias tracking | converges to injected 2 °/s bias within 30 s while still; does not move while the gate is closed |
-| EST-03 | Kalman variant | converges; covariance stays positive definite over 10⁶ steps; matches complementary within 1° on benign data |
-| EST-04 | initialisation from accel | θ(0) = θ_acc to 0.1° |
-| FLT-01 | stuck-frame detector | 20 identical frames → fault; one differing byte → no fault |
-| FLT-02 | gyro saturation | |raw| ≥ 32 700 for 4 cycles → fault, 3 cycles → none |
-| FLT-03 | accel-norm window | 0.4 g for 100 ms → warn; 500 ms → fault |
-| FLT-04 | I2C error policy | 1–2 consecutive errors reuse last sample; 3 → coast + fault; recovery routine called once |
-| CTL-01 | angle PD with rate input | no kick on setpoint step (inverse of UT-PID-05); output equals analytic value |
-| CTL-02 | speed PI sign/units | `+0.1 m/s` error → lean-back command of `Kv_p·0.1` degrees |
-| CTL-03 | integrator anti-windup | frozen while saturated; separate `i_max` honoured |
-| CTL-04 | slew limiter | step 0 → 0.5 m/s takes ≥ 1 s at `acc_max = 0.5` |
-| CTL-05 | mixer + deadband compensation | table-driven: (u, turn) → (L, R) incl. saturation priority (keep `u`, reduce `turn`) |
-| CTL-06 | kinematics | encoder deltas → v, ω, x, ψ for straight, arc, spin |
-| ST-01 | state machine | every transition in doc 01 §7.1 incl. illegal ones; outputs are zero in all non-BALANCING states |
-| ST-02 | arming check | needs 1 s of |θ−trim| < 3° and |ω| < 10 °/s; interrupted window restarts |
-| SHM-01 | seqlock reader/writer | 10⁷ iterations with two threads and random yields: zero torn reads |
-| SHM-02 | ring buffer | wraparound, overrun counter, consumer slower than producer |
-| SHM-03 | parameter block | bad CRC, NaN, out-of-range, wrong version → rejected, old values kept, error code returned |
-| CMD-01 | `SET_TARGET` pack/unpack | int16 range, sign, clamping |
-| CMD-02 | heartbeat watchdog | targets zero after `hb_zero_ms`; restored on resume; never disarms |
-| BCD-01 | `bcd` against fake RTOS | host process + memfd shm + thread emulating the RTOS: command round trip, dead-man, parameter push/ack, telemetry decimation |
+| File | Tests | What it proves |
+|------|-------|----------------|
+| `test_layout.py` (6) | window offsets, record sizes/field offsets, status fields, **parameter table (names, types, ranges, offsets) identical to C**, parameter blocks, protocol ids | generated `bc_layout.py` matches the C compiler's view |
+| `test_shm_interop.py` (10) | header/telemetry/events **written by the real C code, read by Python**; CRC validation and corruption; ring overrun; parameters **written by Python, validated and echoed by the real C code**; corrupt block rejected; Python validation = C ranges; heartbeat visible to C; mailbox packing/ioctl number | cross-language compatibility |
+| `test_bcd.py` (21) | heartbeat ticks, clamp + dead-man, commands, ESTOP ordering, **parameter push confirmed by the real RTOS C code**, invalid values never sent, timeout, save/load, **emergency when the RTOS heartbeat freezes (fires once, re-arms)**, telemetry JSON, event JSON, message handling, **real WebSocket round trip (RFC 6455 accept example, ping/pong, bad JSON)**, client disconnect → dead-man, HTTP endpoints, framing edge cases | `bcd` |
+| `test_camera.py` (11) | selection table, J1/J2/both/none/forced, **IMX219 reported as unsupported**, missing ini, dry run, sysfs GPIO writes, ini names exist in the SDK overlay | `bc_camera` |
+| `test_bcctl_scripts.py` (9) | `bcctl` status/events/get/set rejection; shell scripts parse; Python modules compile; **`duo-init.sh` does not load the PWM module and starts the services; DTS release `&i2c4`/`&spi3`**; web UI uses the protocol | CLI + integration files |
 
-Quality gates: **line coverage ≥ 85 % per file now, 90 % for new files**; branch coverage reported;
-every `FAULT_*` has a test (list generated from the enum and compared with the test names – a tiny script in CI).
+Quality gates: **line coverage ≥ 85 % per file** (`make coverage`); every `FAULT_*` has a test (`st_names_exist_for_every_value`
+plus the individual cases above).
+
+Still to add: a unit test per new `FAULT_*` when one is introduced; spike filter and bus recovery (not implemented).
 
 ## 4. L4 – hardware-in-the-loop (bench) **[plan]**
 
@@ -235,38 +205,43 @@ USB-serial to the RTOS console and SSH/USB-NCM to Linux.
 | `.github/workflows/arduino-sd.yml` | SD images with burnd for ARM and RISC-V boards |
 | `.github/workflows/release.yml` | release packaging |
 
-### 8.2 New workflow **[now]**: `.github/workflows/balance-car-tests.yml`
+### 8.2 Workflow `.github/workflows/balance-car-tests.yml` **[now]**
 
-Triggers: push/PR touching `freertos/cvitek/task/balance_car/**`, `docs/balance_car/**` or the workflow; manual dispatch.
+Triggers: push/PR touching the RTOS tasks, the `rtos_cmdqu` headers, the linker script/kernel config, the DuoS overlay
+and DTS, `docs/balance_car/**` or the workflow; manual dispatch.
 
 | Job | What | Gate |
 |-----|------|------|
-| `unit` matrix: gcc, gcc + ASan/UBSan, clang | `make test` (`-std=c99 -Wall -Wextra -Werror`) – 30 tests | any failure or warning fails |
-| `coverage` | `make coverage` (gcc `--coverage`, gcov) – `pid`, `encoder`, `mpu60x0` ≥ 85 % lines; uploads `.gcov` | below threshold fails |
-| `docs` | `docs/balance_car/check_links.py` – relative links and anchors | broken link fails |
+| `unit` matrix: gcc, gcc + ASan/UBSan, clang | `make test` (`-std=c99 -Wall -Wextra -Werror`) – 107 tests | any failure or warning |
+| `coverage` | `make coverage` – ten source files ≥ 85 % lines; uploads `.gcov` | below threshold |
+| `pytest` | `make pytest` (builds `layout_dump`/`shm_tool`, runs 57 tests) and `gen_bc_layout.py --check` | any failure, or generated layout out of date |
+| `fw-build` matrix: `cv181x` DuoS, `cv180x` Duo | `tools/rtos_build_check.sh`: **real RTOS image build** with the Ubuntu RISC-V GCC + picolibc (T-Head CSR names patched in a scratch copy), fails on any warning in `task/balance_car`, checks `_bc_shm_base`/`prvBalanceCommTask` are linked for cv181x and that `balance_car_start` is **not** linked for cv180x | build failure, warning, missing symbol |
+| `dts` | `tools/dts_check.sh`: cpp + `dtc` on the four DuoS device trees | any parse error |
+| `docs` | `docs/balance_car/check_links.py` | broken link |
 
-Verified locally with gcc (plain, ASan+UBSan, coverage) and clang (plain); the clang+sanitizer combination is deliberately
-not in the matrix because it could not be verified in the authoring environment (missing compiler-rt).
-The workflow file itself has not yet run on GitHub – the first run is the real verification.
+All of these were run locally (gcc, gcc+ASan/UBSan, clang, coverage, both RTOS builds, all four DTS, pytest); clang with
+sanitizers is not in the matrix because the authoring sandbox lacks its runtime. **The workflow itself has not run on
+GitHub yet** – the first run is the real verification; the Ubuntu 24.04 package names for the RISC-V toolchain
+(`gcc-riscv64-unknown-elf`, `picolibc-riscv64-unknown-elf`) are the ones that worked in the sandbox.
 
-### 8.3 Planned additions
+What `fw-build` does *not* prove: it uses a different toolchain/libc than the SDK's (`milkv-duo/host-tools`), so the
+SDK's own `ci.yml` builds remain the authoritative full-image check.
+
+### 8.3 Still planned
 
 | Job | Description | Notes |
 |-----|-------------|-------|
-| `fw-build` | Cross-compile the RTOS image (`freertos/cvitek/build_cv181x.sh`, toolchain `riscv64-unknown-elf-gcc` from `milkv-duo/host-tools`) and fail on warnings in `task/balance_car` | Needs the same environment preparation as `ci.yml`; unverified. Artifact: `cvirtos.elf`. |
-| `fw-size` | `riscv64-unknown-elf-size` of the image; fail if text+data+bss grows beyond a budget; check the `bc_shm` window assertion from the linker script | Budget set after the first successful build |
-| `static` | `cppcheck --enable=warning,performance,portability` and `clang-tidy` (bugprone, cert) on the pure-logic files | Start report-only, then gate |
-| `fault-coverage` | script: every `FAULT_*` enum value appears in a test | cheap, catches untested safety rules |
-| `bcd` tests | Python/C unit tests for the Linux daemon (BCD-01) | once `bcd` exists |
-| `hil-nightly` | self-hosted runner next to a DuoS bench: build → copy `cvirtos.elf` to `/lib/firmware`, `rproc-start.sh`, run HIL-01…07, IPC-01…07, collect `period_us` histogram and telemetry CSV, upload artifacts, fail on KPI regressions | Fixture: relay for power cycling, USB-serial, encoder emulator (second MCU), IMU rotary jig |
-| `release-gate` | tag build requires green `unit`, `coverage`, `fw-build`, `hil-nightly` of the last 3 days, and signed-off FLD checklist | |
+| `fw-size` | fail if the image grows beyond a budget | the linker `ASSERT` already protects the shm window; the current image is 99 KB text |
+| `static` | `cppcheck`/`clang-tidy` on the pure-logic files | report-only first |
+| `hil-nightly` | self-hosted runner next to a DuoS bench: build → `/lib/firmware` → `rproc-start.sh` → HIL/IPC tests, KPI regression check | needs the fixture (relay, USB-serial, encoder emulator, IMU jig) |
+| `release-gate` | tag build requires the above plus signed-off field checklist | |
 
 ### 8.4 Branch and review policy
 
 * PRs touching `balance_car/` need the `balance-car-tests` checks green.
 * Any change to a gain default, filter constant, fault threshold or state-machine rule must update the
   matching test **and** the parameter table in doc 04 §10 in the same PR.
-* Flipping a `KNOWN_DEFECT` test requires a link to the finding ID (C1…C10, doc 04 §9; S1…, doc 06).
+* A change that makes a counter-example test pass (see §2 rule 5) must say why in the PR; findings are tracked as C1…C10 (doc 04 §9) and S1…S18 (doc 06).
 
 ## 9. Test data and reporting
 
@@ -279,12 +254,14 @@ The workflow file itself has not yet run on GitHub – the first run is the real
 ## 10. How to run everything that exists today
 
 ```sh
-# unit + simulation tests
-make -C freertos/cvitek/task/balance_car/test test
-# with sanitizers
-make -C freertos/cvitek/task/balance_car/test clean test SAN=1
-# coverage gate
-make -C freertos/cvitek/task/balance_car/test clean coverage
-# docs links
+T=freertos/cvitek/task/balance_car
+make -C $T/test test                  # 107 C tests (unit + closed-loop simulation)
+make -C $T/test clean test SAN=1      # same under AddressSanitizer + UBSan
+make -C $T/test clean coverage        # per-file line coverage gate
+make -C $T/test pytest                # 57 Python tests (builds the C helper tools first)
+python3 $T/tools/gen_bc_layout.py --check
+$T/tools/dts_check.sh                 # four DuoS device trees (needs device-tree-compiler)
+$T/tools/rtos_build_check.sh          # RTOS image, cv181x (needs gcc-riscv64-unknown-elf + picolibc)
+$T/tools/rtos_build_check.sh cv1800b_milkv_duo_musl_riscv64_sd cv180x
 python3 docs/balance_car/check_links.py
 ```

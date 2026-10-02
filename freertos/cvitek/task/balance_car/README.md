@@ -4,7 +4,7 @@ Two-wheel self-balancing robot control for **Milk-V DuoS** (SG2000):
 
 | Part | Role |
 |------|------|
-| MPU6050 / MPU6500 | Pitch via I2C1 |
+| MPU6050 / MPU6500 | Pitch via I2C0 (`IIC0_SCL/SDA`; I2C1 on `PAD_MIPIRX4P/N` selectable but blocks the 15-pin camera) |
 | TB6612FNG | Dual H-bridge + HW PWM |
 | 2× JGB37-520 | Geared 12 V motors with quadrature encoders |
 
@@ -16,7 +16,7 @@ Edit `include/board_pins.h` if your wiring differs. Remux is applied in `board_p
 
 | Signal | Pad | Function |
 |--------|-----|----------|
-| MPU SCL/SDA | PAD_MIPIRX4P / PAD_MIPIRX4N | I2C1 |
+| MPU SCL/SDA | IIC0_SCL / IIC0_SDA (`BC_MPU_I2C_ID 0`) | I2C0 |
 | TB6612 PWMA | VIVO_D10 | PWM_1 (pwm0 ch1) |
 | TB6612 PWMB | VIVO_D9 | PWM_2 (pwm0 ch2) |
 | AIN1 / AIN2 | VIVO_D1 / VIVO_D2 | XGPIOB_20 / 19 |
@@ -27,7 +27,7 @@ Edit `include/board_pins.h` if your wiring differs. Remux is applied in `board_p
 
 **Power:** TB6612 VM = 12 V for the JGB37-520 motors. Logic (VCC) = 3.3 V. DuoS GPIO is **3.3 V only** — do not drive 5 V into the pads.
 
-**Linux conflict:** Disable or leave unused the same PWM / GPIO / I2C1 nodes in the Linux DTS so the little core owns them.
+**Linux side:** `duo-init.sh` no longer loads the PWM module; `&i2c4` and `&spi3` (pads `VIVO_D0..D8`) are disabled in the four DuoS DTS; `&i2c0` is already disabled. I2C2/I2C3 are the camera buses – never use them here.
 
 ## Build
 
@@ -41,25 +41,19 @@ Built automatically with CVIRTOS (`freertos/cvitek/build_cv181x.sh`) when `BALAN
 
 Copy `cvirtos.elf` to the SD root (or `/lib/firmware/`) as expected by your remoteproc `firmware-name`.
 
-## Control architecture
+## Architecture (see docs/balance_car/01, 04)
 
-1. **IMU** — MPU6050/6500 at 200 Hz, complementary filter → pitch (deg)
-2. **Encoders** — 4× quadrature decode, polled in the control task
-3. **Cascaded PID** — speed loop → angle setpoint; angle loop → motor %
-4. **TB6612** — direction GPIOs + hardware PWM @ 20 kHz
-5. **Safety** — disarm and coast if `|pitch| > 45°`
+* `bc_ctrl` task, 200 Hz, blocks in `vTaskDelayUntil`: IMU burst read → `bc_core_step()` (health, gated complementary
+  estimator, state machine, speed PI → angle PD → turn PI → mixer) → TB6612 + 20 kHz HW PWM.
+* Encoders: GPIO both-edge interrupts (`BC_ENC_USE_IRQ`), 4× decode.
+* States: BOOT → CALIBRATING → IDLE → ARMING → BALANCING (→ FALLEN / FAULT / ESTOP). Motors only run in BALANCING; every other
+  state coasts with `STBY = 0`. Boot never arms by itself.
+* Linux interface: `IP_BALANCE` mailbox commands (arm, disarm, target, parameters, calibrate, heartbeat) + a 64 KiB shared window
+  at the top of the carve-out (telemetry/event rings, parameter block). Linux side: `/mnt/system/bc/` (`bcd`, `bcctl`, web UI).
+* Parameters (gains, limits, signs) are a run-time set; defaults in `bc_params.h`, board sign overrides `BC_BOARD_*_SIGN`.
+* Hold the robot still and upright during the 1 s IMU calibration at boot.
 
-Starting gains in `balance_main.c` (`ANGLE_KP/KD`, `SPEED_KP/KI`) need chassis-specific tuning. Hold the robot upright during gyro bias calibration at boot.
-
-> **Warning:** in the closed-loop simulation (`test/`) the shipped speed-loop gains/sign and the 0.98
-> complementary filter do **not** balance. Treat them as placeholders and read
-> [`docs/balance_car/04-pid-and-motion-control.md`](../../../../docs/balance_car/04-pid-and-motion-control.md)
-> (recommended gains, sign bring-up) before powering the motors on the floor.
-
-## Design docs and tests
-
-* Design and plan: [`docs/balance_car/`](../../../../docs/balance_car/README.md)
-* Host unit tests + simulation: `make -C test test` (no SDK needed; see `docs/balance_car/05-test-plan-and-ci.md`)
+Tests: `make -C test test` (C) and `make -C test pytest` (Linux side); CI also builds the real RTOS image.
 
 ## MPU address
 
@@ -67,4 +61,4 @@ Default `0x68` (AD0 low). Set `BC_MPU_ADDR` to `BC_MPU_ADDR_AD0_HIGH` (`0x69`) i
 
 ## Gear ratio
 
-Set `BC_ENC_GEAR_RATIO` in `board_pins.h` to match your JGB37-520 variant (common values 30/45/60/90/150).
+Set `BC_ENC_GEAR_RATIO` in `board_pins.h` (it seeds the `enc_cpr` parameter) to match your JGB37-520 variant (common values 30/45/60/90/150).
