@@ -17,6 +17,7 @@ extern void prvCameraRunTask(void *pvParameters);
 
 /* Balance-car FreeRTOS app (MPU + TB6612 + encoders). */
 void balance_car_start(void);
+extern void prvBalanceCommTask(void *pvParameters);
 
 QueueHandle_t main_GetMODHandle(QUEUE_HANDLE_E handle_idx);
 

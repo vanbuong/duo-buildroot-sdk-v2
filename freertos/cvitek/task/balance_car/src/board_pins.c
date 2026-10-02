@@ -11,12 +11,20 @@
 
 void board_pins_init(void)
 {
-	/* clk_apb_i2c (EN_1 bit6), clk_i2c (EN_3 bit7), clk_apb_i2c1 (EN_3 bit18) */
+	/* clk_apb_i2c (EN_1 bit6), clk_i2c (EN_3 bit7) shared by all I2C blocks */
 	mmio_setbits_32(CVI_CLKGEN_BASE + CVI_CLK_EN_1, (1U << 6));
-	mmio_setbits_32(CVI_CLKGEN_BASE + CVI_CLK_EN_3, (1U << 7) | (1U << 18));
-
-	/* I2C1 for MPU6050/6500 on PAD_MIPIRX4P/N */
+	mmio_setbits_32(CVI_CLKGEN_BASE + CVI_CLK_EN_3, (1U << 7));
+#if BC_MPU_I2C_ID == 0
+	/* clk_apb_i2c0 (EN_3 bit17); IIC0_SCL/SDA pads (U-Boot parks them as GPIO) */
+	mmio_setbits_32(CVI_CLKGEN_BASE + CVI_CLK_EN_3, (1U << 17));
+	hal_pinmux_config(PINMUX_I2C0);
+#elif BC_MPU_I2C_ID == 1
+	/* clk_apb_i2c1 (EN_3 bit18); PAD_MIPIRX4P/N: collides with the 15-pin CSI connector */
+	mmio_setbits_32(CVI_CLKGEN_BASE + CVI_CLK_EN_3, (1U << 18));
 	hal_pinmux_config(PINMUX_I2C1);
+#else
+#error "BC_MPU_I2C_ID must be 0 or 1 (I2C2/I2C3 are camera buses)"
+#endif
 
 	/* Hardware PWM for TB6612 PWMA / PWMB */
 	PINMUX_CONFIG(VIVO_D10, PWM_1);
@@ -33,5 +41,6 @@ void board_pins_init(void)
 	PINMUX_CONFIG(VIVO_D7, XGPIOB_14);
 	PINMUX_CONFIG(VIVO_D8, XGPIOB_13);
 
-	printf("[balance] DuoS pins remuxed (PWM1/2, VIVO→GPIO, MIPIRX4→I2C1)\n");
+	printf("[balance] DuoS pins remuxed (PWM1/2, VIVO->GPIO, IMU on I2C%d)\n",
+	       BC_MPU_I2C_ID);
 }
