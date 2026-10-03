@@ -28,8 +28,10 @@
 	status = "okay";
 };
 
+/* Pads VIVO_D0..D8 are owned by the balance-robot firmware on the C906L
+ * (encoders, TB6612 direction/STBY); see docs/balance_car/01. */
 &i2c4 {
-	status = "okay";
+	status = "disabled";
 
 	gt9xx: gt9xx@14 {
 		compatible = "goodix,gt9xx";
@@ -41,7 +43,7 @@
 };
 
 &spi3 {
-	status = "okay";
+	status = "disabled";
 
 	spidev@0 {
 		status = "okay";

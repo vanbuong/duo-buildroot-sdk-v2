@@ -1,0 +1,35 @@
+/*
+ * Fake hardware used by host unit tests.
+ *  - GPIO: every pin is a settable level (fake_gpio_set) that the firmware
+ *    reads through gpio_get_value().
+ *  - I2C: poll_i2c_read() serves bytes from a 256-entry register file, and
+ *    records writes; failures can be injected.
+ */
+#ifndef FAKE_HW_H
+#define FAKE_HW_H
+#include <stdint.h>
+
+void fake_gpio_reset(void);
+void fake_gpio_set(int pin, int level);
+int  fake_gpio_get(int pin);
+
+void fake_i2c_reset(void);
+void fake_i2c_set_reg(uint8_t reg, uint8_t val);
+void fake_i2c_set_accel_gyro(int16_t ax, int16_t ay, int16_t az,
+			     int16_t gx, int16_t gy, int16_t gz);
+uint8_t fake_i2c_get_reg(uint8_t reg);
+void fake_i2c_fail_reads(int fail);
+int  fake_i2c_write_count(void);
+/* called before every poll_i2c_read(); lets a test change registers over time */
+void fake_i2c_set_read_hook(void (*hook)(void));
+/* emulate a part that ignores writes to one register (e.g. ACCEL_CONFIG2 on a 6050) */
+void fake_i2c_ignore_writes(uint8_t reg, int ignore);
+
+/* --- DMP model: 12 banks of 256 B reachable through 0x6D/0x6E/0x6F (auto-increment),
+ *     and a FIFO behind 0x72/0x73/0x74. USER_CTRL (0x6A) bit 2 resets the FIFO. --- */
+uint8_t fake_dmp_mem_get(unsigned pos);
+void fake_dmp_mem_stuck(int pos);		/* writes to this memory byte are ignored (-1 = none) */
+void fake_fifo_push(const uint8_t *data, unsigned len);
+unsigned fake_fifo_len(void);
+int fake_fifo_resets(void);
+#endif

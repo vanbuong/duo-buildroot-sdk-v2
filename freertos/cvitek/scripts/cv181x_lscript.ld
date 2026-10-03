@@ -200,5 +200,10 @@ SECTIONS
 } > psu_ddr_0_MEM_0
 
 _end = .;
+
+/* 64 KiB window shared with Linux (docs/balance_car/01 section 6.2) at the top of
+ * the carve-out; the image must not grow into it. */
+_bc_shm_base = ORIGIN(psu_ddr_0_MEM_0) + LENGTH(psu_ddr_0_MEM_0) - 0x10000;
+ASSERT(_end <= _bc_shm_base, "FreeRTOS image overlaps the 64 KiB bc_shm window")
 }
 

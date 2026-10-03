@@ -1,0 +1,144 @@
+name: balance-car-tests
+
+# Balance-robot checks (freertos/cvitek/task/balance_car, Linux side in
+# device/generic/rootfs_overlay/duos/mnt/system/bc):
+#   unit/coverage - host unit tests + closed-loop simulation of the real control core
+#   pytest        - Linux daemon/library tests incl. cross-checks against the real C shm code
+#   layout        - generated Python layout is in sync with the C headers
+#   fw-build      - the actual FreeRTOS image builds (cv181x with balance, cv180x without)
+#   dts           - the four DuoS device trees compile
+#   cppcheck      - static analysis of the pure-logic modules (report only for now)
+#   docs          - documentation links
+# Test plan: docs/balance_car/05-test-plan-and-ci.md
+
+on:
+  push:
+    paths:
+      - 'freertos/cvitek/task/**'
+      - 'freertos/cvitek/driver/rtos_cmdqu/**'
+      - 'freertos/cvitek/scripts/**'
+      - 'freertos/cvitek/kernel/include/**'
+      - 'osdrv/interdrv/rtos_cmdqu/**'
+      - 'device/generic/rootfs_overlay/duos/**'
+      - 'build/boards/cv181x/**duos**'
+      - 'docs/balance_car/**'
+      - '.github/workflows/balance-car-tests.yml'
+  pull_request:
+    paths:
+      - 'freertos/cvitek/task/**'
+      - 'freertos/cvitek/driver/rtos_cmdqu/**'
+      - 'freertos/cvitek/scripts/**'
+      - 'freertos/cvitek/kernel/include/**'
+      - 'osdrv/interdrv/rtos_cmdqu/**'
+      - 'device/generic/rootfs_overlay/duos/**'
+      - 'build/boards/cv181x/**duos**'
+      - 'docs/balance_car/**'
+      - '.github/workflows/balance-car-tests.yml'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: freertos/cvitek/task/balance_car/test
+
+jobs:
+  unit:
+    name: unit+sim (${{ matrix.cc }}${{ matrix.san == '1' && ', asan+ubsan' || '' }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cc: gcc,   san: '0' }
+          - { cc: gcc,   san: '1' }
+          - { cc: clang, san: '0' }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run
+        run: make test CC=${{ matrix.cc }} SAN=${{ matrix.san == '1' && '1' || '' }}
+
+  coverage:
+    name: line coverage gate
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Coverage (pid, encoder, mpu60x0 >= 85 %)
+        run: make coverage
+      - name: Upload gcov data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: balance-car-gcov
+          path: freertos/cvitek/task/balance_car/test/build/cov/*.gcov
+          if-no-files-found: ignore
+
+  pytest:
+    name: linux side (python)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: bcd / bc_shm / bc_camera / bcctl tests (with real C shm tools)
+        run: make pytest
+      - name: Generated layout is up to date
+        working-directory: .
+        run: python3 freertos/cvitek/task/balance_car/tools/gen_bc_layout.py --check
+
+  fw-build:
+    name: RTOS image (${{ matrix.chip }}, ${{ matrix.board }})
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: .
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { chip: cv181x, board: sg2000_milkv_duos_glibc_arm64_sd }
+          - { chip: cv180x, board: cv1800b_milkv_duo_musl_riscv64_sd }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-unknown-elf picolibc-riscv64-unknown-elf \
+              cmake ninja-build python3 perl
+      - name: Build cvirtos.elf, fail on balance_car warnings, check shm window
+        run: freertos/cvitek/task/balance_car/tools/rtos_build_check.sh ${{ matrix.board }} ${{ matrix.chip }}
+
+  dts:
+    name: DuoS device trees
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y device-tree-compiler
+      - run: freertos/cvitek/task/balance_car/tools/dts_check.sh
+
+  docs:
+    name: docs link check
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 docs/balance_car/check_links.py
+
+  cppcheck:
+    name: cppcheck (pure logic, report only)
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: freertos/cvitek/task/balance_car
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Analyse
+        run: |
+          cppcheck --enable=warning,portability,performance --inconclusive --std=c99 \
+            --error-exitcode=1 --inline-suppr -Iinclude -Itest/stubs -DHOST_TEST \
+            src/pid.c src/encoder.c src/mpu60x0.c src/bc_params.c src/estimator.c \
+            src/control.c src/bc_state.c src/imu_health.c src/bc_cmd.c src/bc_core.c \
+            src/i2c_recover.c src/dmp612.c

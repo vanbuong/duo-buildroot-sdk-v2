@@ -106,6 +106,18 @@ TASK_CTX_S gTaskCtx[E_QUEUE_MAX] = {
 		.queLength = 10,
 		.queHandle = NULL,
 	},
+	{
+		.name = "BALANCE",
+		.stack_size = configMINIMAL_STACK_SIZE * 2,
+		.priority = tskIDLE_PRIORITY + 4,
+#ifdef BALANCE_CAR_ENABLE
+		.runTask = prvBalanceCommTask,
+#else
+		.runTask = NULL,
+#endif
+		.queLength = 16,
+		.queHandle = NULL,
+	},
 };
 
 volatile struct mailbox_set_register *mbox_reg;
@@ -154,6 +166,11 @@ void main_cvirtos(void)
 #endif
 
 	main_create_tasks();
+
+#ifdef BALANCE_CAR_ENABLE
+	/* Two-wheel balance car: IMU + TB6612 + encoders on little core. */
+	balance_car_start();
+#endif
 
 	/* Start the tasks and timer running. */
 	vTaskStartScheduler();
@@ -389,6 +406,9 @@ void prvQueueISR(void)
 						break;
 					case IP_CAMERA:
 						xQueueSendFromISR(gTaskCtx[E_QUEUE_CAMERA].queHandle, &rtos_cmdq, &YieldRequired);
+						break;
+					case IP_BALANCE:
+						xQueueSendFromISR(gTaskCtx[E_QUEUE_BALANCE].queHandle, &rtos_cmdq, &YieldRequired);
 						break;
 					default:
 						printf("unknown ip_id =%d cmd_id=%d\n", rtos_cmdq.ip_id, rtos_cmdq.cmd_id);

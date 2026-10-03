@@ -19,6 +19,11 @@ void hal_pinmux_config(int io_type)
 			PINMUX_CONFIG(IIC0_SCL, IIC0_SCL);
 			PINMUX_CONFIG(IIC0_SDA, IIC0_SDA);
 		break;
+		case PINMUX_I2C1:
+			/* DuoS: PAD_MIPIRX4P/N as IIC1 (header-friendly alt). */
+			PINMUX_CONFIG(PAD_MIPIRX4P, IIC1_SCL);
+			PINMUX_CONFIG(PAD_MIPIRX4N, IIC1_SDA);
+		break;
 		case PINMUX_I2C3:
 			PINMUX_CONFIG(IIC3_SCL, IIC3_SCL);
 			PINMUX_CONFIG(IIC3_SDA, IIC3_SDA);

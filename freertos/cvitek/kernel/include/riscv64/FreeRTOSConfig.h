@@ -116,6 +116,7 @@ to exclude the API function. */
 #define INCLUDE_xTaskAbortDelay				1
 #define INCLUDE_xTaskGetHandle				1
 #define INCLUDE_xSemaphoreGetMutexHolder	1
+#define INCLUDE_uxTaskGetStackHighWaterMark	1
 
 #define fabs(x) __builtin_fabs(x)
 

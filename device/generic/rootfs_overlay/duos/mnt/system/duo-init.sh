@@ -30,6 +30,12 @@ insmod /mnt/system/ko/aic8800_bsp.ko
 sleep 0.5
 insmod /mnt/system/ko/aic8800_fdrv.ko
 
-# Insmod PWM Module
-insmod /mnt/system/ko/cv181x_pwm.ko
+# The PWM0 block (VIVO_D9/D10) belongs to the balance-robot firmware on the C906L
+# (docs/balance_car/01), so the Linux PWM module is not loaded here.
+# insmod /mnt/system/ko/cv181x_pwm.ko
+
+# Balance robot services: bcd (teleop/telemetry), Wi-Fi, camera + RTSP.
+if [ -f /mnt/system/bc/bc-start.sh ]; then
+    sh /mnt/system/bc/bc-start.sh &
+fi
 
