@@ -15,14 +15,17 @@ TELEM_SLOTS, EVENT_SLOTS = 256, 128
 HDR_FMT = '<4I16s8I'
 STATUS_FIELDS = ('rtos_heartbeat', 'state', 'fault', 'deadline_miss', 'imu_err', 'cpu_load_pct',
                  'telem_head', 'event_head', 'cycles', 'lost_cmds', 'stack_min0', 'stack_min1',
-                 'stack_min2', 'stack_min3', 'reserved0', 'reserved1')
+                 'stack_min2', 'stack_min3', 'imu_variant', 'reserved0')
 STATUS_FMT = '<16I'
+CALIB_FIELDS = ('seq', 'valid', 'gyro_bias_x', 'gyro_bias_y', 'gyro_bias_z', 'accel_x', 'accel_y',
+                'accel_z', 'trim_deg', 'temp_c')
+CALIB_FMT = '<2I8f'            # followed by 8 reserved words
 LINUX_FMT = '<16I'
 TELEM_FIELDS = ('seq', 't_us', 'pitch_cdeg', 'pitch_acc_cdeg', 'gyro_y_cdps', 'gyro_z_cdps',
                 'accel_norm_mg', 'speed_l_mmps', 'speed_r_mmps', 'angle_set_cdeg', 'motor_l_pm',
                 'motor_r_pm', 'target_speed_mmps', 'target_turn_mradps', 'enc_l', 'enc_r',
-                'vbat_mv', 'exec_us', 'period_us', 'state', 'fault', 'imu_err', 'flags', 'pad', 'crc')
-TELEM_FMT = '<II12hiiHHHBBBB10sI'
+                'vbat_mv', 'exec_us', 'period_us', 'state', 'fault', 'imu_err', 'flags', 'psi_mrad', 'x_mm', 'pad', 'crc')
+TELEM_FMT = '<II12hiiHHHBBBBhi4sI'
 EVENT_FIELDS = ('seq', 't_us', 'type', 'arg', 'val', 'pad')
 EVENT_FMT = '<IIHHi16s'
 
@@ -31,6 +34,12 @@ PARAMS = (
     ('est_alpha', 'F', 0.998, 0.9, 0.9999),
     ('est_gate_g', 'F', 0.1, 0.0, 1.0),
     ('est_bias_gain', 'F', 0.02, 0.0, 1.0),
+    ('est_mode', 'I', 0, 0, 1),
+    ('est_spike_deg', 'F', 20.0, 0.0, 90.0),
+    ('kf_q_angle', 'F', 0.001, 1e-06, 1.0),
+    ('kf_q_bias', 'F', 0.003, 1e-06, 1.0),
+    ('kf_r', 'F', 3.0, 0.0001, 10.0),
+    ('kf_robust_deg', 'F', 3.0, 0.0, 30.0),
     ('a_kp', 'F', 15.0, 3.5, 60.0),
     ('a_kd', 'F', 0.8, 0.0, 5.0),
     ('a_ki', 'F', 0.0, 0.0, 5.0),
@@ -40,6 +49,8 @@ PARAMS = (
     ('v_ki', 'F', 1.94, 0.0, 8.0),
     ('v_max_deg', 'F', 8.0, 0.0, 20.0),
     ('v_filter', 'F', 0.3, 0.01, 1.0),
+    ('x_kp', 'F', 0.0, 0.0, 3.0),
+    ('x_vmax', 'F', 0.15, 0.02, 1.0),
     ('t_kp', 'F', 5.0, 0.0, 30.0),
     ('t_ki', 'F', 5.0, 0.0, 30.0),
     ('t_max', 'F', 20.0, 0.0, 50.0),

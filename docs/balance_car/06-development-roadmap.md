@@ -14,13 +14,13 @@ who knows the SDK; widen by 1.5× for someone new to it).
 |-----------|--------|-------|
 | M0 Hardware/ownership validation | **partly done** | software side done: IMU on I2C0 (`BC_MPU_I2C_ID`), Linux PWM module not loaded, `&i2c4`/`&spi3` disabled, image size measured (99 KB text, headroom 1.2 MiB before the shm window). **Hardware items open:** IIC0 pad routing, STBY pull-down, e-stop, battery sense, HIL-01/03/04 |
 | M1 Safety/correctness fixes | **done** | S1, S3, S5, S11, S13, C1–C3 fixed (sign/units/gains, boot to IDLE, coast + STBY off outside BALANCING, printf out of the loop) |
-| M2 Estimator + controller as pure modules | **done** | gated filter + bias tracking, derivative-on-rate, speed PI in m/s, turn PI, slew, mixer, state machine, health monitor; Kalman not implemented; 107 host tests |
-| M3 Real-time structure | **mostly done** | blocking task, measured dt, timing statistics, console task, IRQ encoders (`BC_ENC_USE_IRQ`), IMU burst. **Not done:** HW-timer pacing (tick-paced), PWM update-in-place (S12), CPU-load measurement; IRQ path unverified on hardware |
+| M2 Estimator + controller as pure modules | **done** | gated filter + bias tracking, derivative-on-rate, speed PI in m/s, turn PI, slew, mixer, state machine, health monitor; **plus** spike filter, optional robust Kalman, odometry, optional position hold, MPU6050/6500 variant detection with read-back-verified init; 135 host tests |
+| M3 Real-time structure | **mostly done** | blocking task, measured dt, timing statistics, console task, IRQ encoders (`BC_ENC_USE_IRQ`), IMU burst. I2C bus recovery and `bc_ctrl` task-load measurement added (both unverified on hardware). **Not done:** HW-timer pacing (tick-paced), PWM update-in-place (S12); IRQ path unverified on hardware |
 | M4 Linux↔RTOS interface | **done** | `IP_BALANCE` (both headers), `bc_shm` window + linker assert, seqlock rings, parameter block/echo, heartbeat watchdog, Linux emergency STBY clear, `bcd`/`bcctl`; RTOS→Linux mailbox events deliberately off (shm ring instead) |
-| M5 Wi-Fi teleoperation | **done in software** | `bc-net.sh` (STA, AP fallback if hostapd present), WebSocket server, web UI, dead-man; **not run**, `hostapd` not added to defconfigs |
-| M6 Video | **partly done** | camera select (`bc_camera.py`), `bc-video.sh`; **not done:** profiles, adaptive rate, OSD, jitter test, IMX219 driver; RTSP binary/args unverified |
+| M5 Wi-Fi teleoperation | **done in software** | `bc-net.sh` (STA, AP fallback if hostapd present), WebSocket server, web UI, dead-man; **not run**; `BR2_PACKAGE_HOSTAPD=y` is in the four DuoS defconfigs; telemetry logging (rotating JSONL) added |
+| M6 Video | **partly done** | camera select (`bc_camera.py`), `bc-video.sh`; profiles + adaptive-rate logic + web selector done in software (effect depends on the RTSP binary, unverified); **not done:** OSD, embedded video, jitter test, IMX219 driver (needs the sensor/driver) |
 | M7 Identification, tuning, field validation | **not done** | needs the robot |
-| M8 CI maturation | **mostly done** | `unit`, `coverage`, `pytest`, layout drift, **real RTOS image builds**, DTS; open: `fw-size`, static analysis, HIL nightly, release gate |
+| M8 CI maturation | **mostly done** | `unit`, `coverage`, `pytest`, layout drift, **real RTOS image builds**, DTS; firmware size budget in the RTOS build check, `cppcheck` job (report only); open: HIL nightly runner (needs a board), release gate |
 
 Verification status of everything marked done: compiled/tested in CI as described in [05 §8](05-test-plan-and-ci.md); **no
 code has run on a DuoS board**.
@@ -229,7 +229,7 @@ can overlap M2–M3 with M5–M6 after M4's interface is agreed and shave ≈ 2 
 | D1 | All balance-critical code runs on the C906L; Linux only requests setpoints | Linux is not hard real-time; P1 | never |
 | D2 | Mailbox for commands/events, shared memory for bulk data | Mailbox is 8 slots × 8 B; telemetry needs ~12 KB/s | if rpmsg/virtio is ported |
 | D3 | Derivative on gyro rate, not on error | no setpoint kick, less noise | – |
-| D4 | Gated complementary filter first, Kalman optional | simple, testable, simulation-backed | if tuning logs show drift problems |
+| D4 | Gated complementary filter first, Kalman optional (**now implemented as `est_mode = 1`, default stays complementary**) | simple, testable, simulation-backed | if tuning logs show drift problems |
 | D5 | Speed loop in m/s, gains in °/(m/s) | physically meaningful, transfers across gear ratios/wheels | – |
 | D6 | HW-timer driven control task instead of changing the global tick | keeps the rest of the image unchanged | if the HAL timer is impractical → 1 kHz tick |
 | D7 | Heartbeat loss zeroes targets but keeps balancing | disarming a moving robot is more dangerous than standing still | product safety review |
@@ -258,9 +258,23 @@ can overlap M2–M3 with M5–M6 after M4's interface is agreed and shave ≈ 2 
 | `freertos/cvitek/task/comm/`, `driver/rtos_cmdqu/`, `osdrv/interdrv/rtos_cmdqu/` | `IP_BALANCE` routing |
 | `freertos/cvitek/scripts/cv181x_lscript.ld`, `kernel/include/riscv64/FreeRTOSConfig.h` | shm window assertion, stack watermark API |
 | `freertos/cvitek/task/CMakeLists.txt`, `task/main/CMakeLists.txt` | balance firmware only for `cv181x` |
-| `freertos/cvitek/task/balance_car/test/` | 107 host tests, fakes, simulation, helper tools |
-| `freertos/cvitek/task/balance_car/linux_tests/`, `tools/` | 57 Python tests; layout generator, RTOS build check, DTS check |
+| `freertos/cvitek/task/balance_car/test/` | 135 host tests, fakes, simulation, helper tools |
+| `freertos/cvitek/task/balance_car/linux_tests/`, `tools/` | 71 Python tests; layout generator, RTOS build check, DTS check |
 | `device/generic/rootfs_overlay/duos/mnt/system/bc/` | `bcd`, `bcctl`, `bc_shm`, `bc_camera`, scripts, web UI, generated layout |
 | `device/generic/rootfs_overlay/duos/mnt/system/duo-init.sh` | starts the services, no Linux PWM module |
 | `build/boards/cv181x/*duos*/dts_*/*.dts` | `&i2c4`, `&spi3` disabled |
 | `.github/workflows/balance-car-tests.yml` | CI |
+
+
+## 10. What is left, split by whether it needs hardware
+
+**Needs hardware (cannot be completed or verified in software):**
+all HIL/system/field tests (doc 05 §4–6) and gain tuning from system identification; IIC0 pad routing, GPIO IRQ number and DW GPIO use,
+I2C bus-recovery pad mapping, camera chip ids and Linux GPIO numbering; IMX219 sensor (needs a driver/ISP tuning file for the SDK);
+hardware e-stop, STBY supervisor, battery sense; the real RTSP binary and encoder reconfiguration for the video profiles; the Wi-Fi/video
+jitter test (`PERF-03`); HIL nightly runner (needs a board on a self-hosted runner).
+
+**Not hardware-dependent but deliberately not done:** hardware-timer-paced control and PWM update-in-place (S12) – both change the
+real-time core and are only worth doing once measurements on a board show the tick-paced loop or the PWM restart glitch is a problem;
+mailbox events RTOS→Linux (the shm ring is used and works); OSD and embedded video in the web page (depend on the media stack);
+DMP use (see doc 03 §2.2a – decided against).

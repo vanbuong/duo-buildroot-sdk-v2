@@ -30,6 +30,7 @@ class InteropTest(unittest.TestCase):
         self.assertEqual(st["telem_head"], 40)
         self.assertEqual(st["rtos_heartbeat"], 77)
         self.assertEqual(st["state_name"], "BALANCING")
+        self.assertEqual(st["imu_variant"], 2)
         for n in (0, 17, 39):
             rc, r = self.shm.read_telem(n)
             self.assertEqual(rc, 0)
@@ -38,6 +39,8 @@ class InteropTest(unittest.TestCase):
             self.assertEqual(r["enc_r"], -10 * n)
             self.assertEqual(r["pitch_cdeg"], n % 3000 - 1500)
             self.assertEqual(r["vbat_mv"], 11800)
+            self.assertEqual(r["x_mm"], 3 * n)
+            self.assertEqual(r["psi_mrad"], n % 100 - 50)
             self.assertEqual(r["period_us"], 5000)
         self.assertEqual(self.shm.read_telem(40)[0], 1)
 
@@ -58,6 +61,16 @@ class InteropTest(unittest.TestCase):
         self.assertGreater(rd.lost, 0)
         self.assertEqual(recs[-1]["enc_l"], 2990)
         self.assertEqual([r["t_us"] for r in recs], sorted(r["t_us"] for r in recs))
+
+    def test_calibration_block_from_c(self):
+        self.assertIsNone(self.shm.read_calib())	# nothing published yet
+        common.tool("shm_tool", "calib", self.path)
+        c = self.shm.read_calib()
+        self.assertEqual(c["gyro_bias_dps"], [0.5, -1.25, 2.0])
+        self.assertAlmostEqual(c["accel_mean_g"][2], 0.998, places=5)
+        self.assertEqual(c["trim_deg"], 1.75)
+        self.assertEqual(c["temp_c"], 31.5)
+        self.assertEqual(c["seq"] & 1, 0)
 
     def test_events_from_c(self):
         common.tool("shm_tool", "event", self.path, 5)

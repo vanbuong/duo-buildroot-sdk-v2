@@ -7,6 +7,7 @@ name: balance-car-tests
 #   layout        - generated Python layout is in sync with the C headers
 #   fw-build      - the actual FreeRTOS image builds (cv181x with balance, cv180x without)
 #   dts           - the four DuoS device trees compile
+#   cppcheck      - static analysis of the pure-logic modules (report only for now)
 #   docs          - documentation links
 # Test plan: docs/balance_car/05-test-plan-and-ci.md
 
@@ -123,3 +124,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 docs/balance_car/check_links.py
+
+  cppcheck:
+    name: cppcheck (pure logic, report only)
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: freertos/cvitek/task/balance_car
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Analyse
+        run: |
+          cppcheck --enable=warning,portability,performance --inconclusive --std=c99 \
+            --error-exitcode=1 --inline-suppr -Iinclude -Itest/stubs -DHOST_TEST \
+            src/pid.c src/encoder.c src/mpu60x0.c src/bc_params.c src/estimator.c \
+            src/control.c src/bc_state.c src/imu_health.c src/bc_cmd.c src/bc_core.c \
+            src/i2c_recover.c

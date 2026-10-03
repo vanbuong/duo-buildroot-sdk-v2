@@ -77,6 +77,25 @@ class Shm:
         d["fault_name"] = (L.FAULT_NAMES[d["fault"]] if d["fault"] < len(L.FAULT_NAMES) else "?")
         return d
 
+    def read_calib(self):
+        """Calibration the RTOS measured (gyro bias, accel mean, trim), or None
+        if it has not published one / the read was torn."""
+        sz = struct.calcsize(L.CALIB_FMT)
+        for _ in range(10):
+            s1 = self.u32(L.OFF_CALIB)
+            if s1 & 1:
+                continue
+            raw = bytes(self.m[L.OFF_CALIB:L.OFF_CALIB + sz])
+            if self.u32(L.OFF_CALIB) != s1:
+                continue
+            d = dict(zip(L.CALIB_FIELDS, struct.unpack(L.CALIB_FMT, raw)))
+            if not d["valid"]:
+                return None
+            return {"gyro_bias_dps": [d["gyro_bias_x"], d["gyro_bias_y"], d["gyro_bias_z"]],
+                    "accel_mean_g": [d["accel_x"], d["accel_y"], d["accel_z"]],
+                    "trim_deg": d["trim_deg"], "temp_c": d["temp_c"], "seq": d["seq"]}
+        return None
+
     def bump_heartbeat(self):
         hb = (self.u32(L.OFF_LINUX) + 1) & 0xFFFFFFFF
         self.set_u32(L.OFF_LINUX, hb)

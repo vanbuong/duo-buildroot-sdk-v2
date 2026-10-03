@@ -94,6 +94,8 @@ void bc_core_step(bc_core_t *c, const bc_core_in_t *in, bc_core_out_t *out)
 		out->ctl.out_l = out->ctl.out_r = 0.0f;
 		out->ctl.u = out->ctl.turn = out->ctl.theta_cmd = 0.0f;
 		out->ctl.v_f = out->ctl.v_l = out->ctl.v_r = 0.0f;
+		out->ctl.x_m = out->ctl.psi_rad = 0.0f;
+		out->ctl.hold_active = 0;
 		out->out_l = out->out_r = 0.0f;
 	}
 }

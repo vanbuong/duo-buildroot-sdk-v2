@@ -7,7 +7,7 @@ Legend: **[now]** implemented in `freertos/cvitek/task/balance_car`, **[plan]** 
 host simulation (`test/`, doc 05), **[est]** assumption to verify on hardware.
 
 > **Status.** The control design below is **implemented** (`estimator.c`, `control.c`, `bc_state.c`, `bc_core.c`,
-> wired up in `balance_main.c`) and covered by 107 host tests, including a closed-loop simulation that runs the
+> wired up in `balance_main.c`) and covered by 135 host tests, including a closed-loop simulation that runs the
 > real code against a wheeled-inverted-pendulum plant. The simulation also showed that the *first* firmware version
 > (speed-loop gain `+0.05` in counts/s, 0.98 complementary filter, no gate) could not balance; those defects (C1–C10,
 > §9) are fixed. The plant is a model with **assumed** parameters, so margins must be confirmed on the real chassis
@@ -201,7 +201,7 @@ Behaviours:
 
 | Command | Mechanism |
 |---------|-----------|
-| **Stand still** | `v_t = 0`: speed integral pulls the car back to zero speed; position hold (optional) adds `Kx·(x − x_hold)` to the speed command |
+| **Stand still** | `v_t = 0`: speed integral pulls the car back to zero speed. **Position hold [now, off by default: `x_kp = 0`]:** with `x_kp > 0` and no motion command, after 0.5 s standing still (|v_f| < 0.05 m/s) the position is captured and `clamp(x_kp·(x_hold − x), ±x_vmax)` is added to the speed target (cap `x_vmax` = 0.15 m/s so a push never makes the car race back); any motion command releases it. In simulation it stays stable after a push (`sim_position_hold_stays_stable_and_bounded`); its benefit against real drift is unmeasured. |
 | **Forward/backward** | `v_t ≠ 0` → speed loop leans the car; steady speed ≈ constant lean `θ ≈ a_drag/g` |
 | **Stop** | ramp `v_t → 0` at `acc_max`; the car leans back to decelerate (never an instant brake) |
 | **Turn in place** | `v_t = 0`, `w_t ≠ 0` → equal and opposite wheel drive; the angle loop still balances |
@@ -343,15 +343,21 @@ Troubleshooting:
 | `acc_max`, `alpha_max` | m/s², rad/s² | 0.5, 3 | | |
 | `v_max`, `w_max` | m/s, rad/s | 0.5, 2 | | |
 | `fall_deg`, `sat_ms` | °, ms | 45, 300 | | |
+| `est_mode` | – | 0 | 0–1 | 0 = gated complementary, 1 = robust Kalman (doc 03 §3.3) |
+| `est_spike_deg` | ° | 20 | 0–90 | 0 disables the spike filter (doc 03 §3.3a) |
+| `kf_q_angle`, `kf_q_bias`, `kf_r`, `kf_robust_deg` | – | 0.001, 0.003, 3.0, 3.0 | | only used with `est_mode = 1` |
+| `x_kp`, `x_vmax` | 1/s, m/s | 0, 0.15 | | position hold; 0 = off |
+
+The table lists the parameters added since the first version; the total is **43** (see `bc_params.h` / generated `bc_layout.py`).
 
 ## 11. Validation hooks
 
 | What | Where |
 |------|-------|
 | PID mathematics (P, clamp, I and anti-windup, D, rate form, reset, dt safety) | `test_pid.c` (10 tests) |
-| Controller: sign convention, trim, saturation, speed loop leans back when moving forward, encoder sign, slew, turn, mixer priority, deadband | `test_control.c` (13 tests) |
+| Controller: sign convention, trim, saturation, speed loop leans back when moving forward, encoder sign, slew, turn, mixer priority, deadband, odometry, position hold (off by default, engages, pulls back, capped, released) | `test_control.c` (18 tests) |
 | State machine: every transition, fall, lift, saturation, IMU faults, ESTOP latch | `test_state.c` (21 tests) |
-| Closed loop (real `bc_core`): balances for plant gains 0.02–0.2 m/s²/%, tolerates noise, recovers from a 34 °/s push, starts from 12° lean, arming flow, speed-gain limits, wrong encoder sign diverges, IMU unplug | `test_sim.c` (10 tests) |
+| Closed loop (real `bc_core`): balances for plant gains 0.02–0.2 m/s²/%, tolerates noise, recovers from a 34 °/s push, starts from 12° lean, arming flow, speed-gain limits, wrong encoder sign diverges, IMU unplug | `test_sim.c` (12 tests, incl. Kalman mode and position hold) |
 | Hardware | `HIL-*`, `FLD-*` in doc 05 (not run) |
 
 Simulation plant: 0.10 m CoM height, `b = 0.05`, 6 % deadband, 20 ms actuator lag, 200 Hz loop, accelerometer

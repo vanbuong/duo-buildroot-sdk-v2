@@ -216,6 +216,121 @@ static void ctl_reset_clears_state(void)
 	CHECK_NEAR(c.pa.integral, 0.0, 1e-9);
 }
 
+static void ctl_odometry_integrates_distance_and_heading(void)
+{
+	bc_params_t p;
+	bc_ctrl_t c;
+	bc_ctrl_in_t in = base_in();
+	bc_ctrl_out_t o;
+	int i;
+
+	bc_params_default(&p);
+	bc_ctrl_init(&c, &p);
+	for (i = 0; i < 200; i++) {		/* 1 s at 1 m/s (97 counts per 5 ms) */
+		in.enc_l += 97;
+		in.enc_r += 97;
+		in.omega_z = 90.0f;		/* deg/s */
+		bc_ctrl_step(&c, &p, &in, &o);
+	}
+	CHECK_NEAR(o.x_m, 1.0, 0.02);
+	CHECK_NEAR(o.psi_rad, 1.5708, 0.02);
+	bc_ctrl_reset(&c);
+	CHECK_NEAR(c.x_m, 0.0, 1e-9);
+	CHECK_NEAR(c.psi_rad, 0.0, 1e-9);
+}
+
+static void ctl_position_hold_is_off_by_default(void)
+{
+	bc_params_t p;
+	bc_ctrl_t c;
+	bc_ctrl_in_t in = base_in();
+	bc_ctrl_out_t o;
+	int i;
+
+	bc_params_default(&p);
+	CHECK_NEAR(p.x_kp, 0.0, 1e-9);
+	bc_ctrl_init(&c, &p);
+	for (i = 0; i < 400; i++)
+		bc_ctrl_step(&c, &p, &in, &o);
+	CHECK(!o.hold_active);
+}
+
+static void ctl_position_hold_engages_after_standstill_and_pulls_back(void)
+{
+	bc_params_t p;
+	bc_ctrl_t c;
+	bc_ctrl_in_t in = base_in();
+	bc_ctrl_out_t o;
+	int i;
+
+	bc_params_default(&p);
+	p.x_kp = 1.0f;
+	bc_ctrl_init(&c, &p);
+	for (i = 0; i < 80; i++)		/* 0.4 s: not yet */
+		bc_ctrl_step(&c, &p, &in, &o);
+	CHECK(!o.hold_active);
+	for (i = 0; i < 40; i++)		/* > 0.5 s */
+		bc_ctrl_step(&c, &p, &in, &o);
+	CHECK(o.hold_active);
+	CHECK_NEAR(o.theta_cmd, 0.0, 1e-3);
+	/* the car is pushed 10 cm forward: it must lean BACK (positive angle) to return */
+	in.enc_l += 1939;
+	in.enc_r += 1939;
+	bc_ctrl_step(&c, &p, &in, &o);
+	CHECK(o.x_m > 0.09f);
+	for (i = 0; i < 20; i++)
+		bc_ctrl_step(&c, &p, &in, &o);
+	CHECK(o.theta_cmd > 0.05f);
+	CHECK(o.hold_active);
+}
+
+static float hold_response(float x_vmax, int release)
+{
+	bc_params_t p;
+	bc_ctrl_t c;
+	bc_ctrl_in_t in = base_in();
+	bc_ctrl_out_t o;
+	float peak = 0.0f;
+	int i;
+
+	bc_params_default(&p);
+	p.x_kp = 3.0f;
+	p.x_vmax = x_vmax;
+	bc_ctrl_init(&c, &p);
+	for (i = 0; i < 140; i++)
+		bc_ctrl_step(&c, &p, &in, &o);
+	for (i = 0; i < 200; i++) {		/* pushed 1 m forward over 1 s... */
+		in.enc_l += 97;
+		in.enc_r += 97;
+		bc_ctrl_step(&c, &p, &in, &o);
+	}
+	for (i = 0; i < 60; i++) {		/* ...then it stands still again */
+		bc_ctrl_step(&c, &p, &in, &o);
+		if (i >= 40 && fabsf(o.theta_cmd) > peak)
+			peak = fabsf(o.theta_cmd);
+	}
+	if (release) {
+		in.v_target = 0.2f;		/* driver takes over */
+		bc_ctrl_step(&c, &p, &in, &o);
+		return o.hold_active ? 1.0f : 0.0f;
+	}
+	return peak;
+}
+
+static void ctl_position_hold_correction_is_capped(void)
+{
+	float capped = hold_response(0.05f, 0);
+	float wide = hold_response(1.0f, 0);
+
+	CHECK(capped > 0.0f && wide > 0.0f);
+	CHECK(capped < 0.5f * wide);		/* speed-loop residue from the push is common to both */
+}
+
+static void ctl_position_hold_releases_on_motion_command(void)
+{
+	CHECK_NEAR(hold_response(0.15f, 1), 0.0, 1e-9);
+}
+
 void suite_control(void)
 {
 	printf("suite control\n");
@@ -232,4 +347,9 @@ void suite_control(void)
 	RUN(ctl_turn_makes_differential_drive);
 	RUN(ctl_mixer_keeps_balance_drive_over_turn);
 	RUN(ctl_reset_clears_state);
+	RUN(ctl_odometry_integrates_distance_and_heading);
+	RUN(ctl_position_hold_is_off_by_default);
+	RUN(ctl_position_hold_engages_after_standstill_and_pulls_back);
+	RUN(ctl_position_hold_correction_is_capped);
+	RUN(ctl_position_hold_releases_on_motion_command);
 }

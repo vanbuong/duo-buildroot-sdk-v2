@@ -17,6 +17,11 @@ typedef struct {
 	float theta_cmd;	/* lean command from the speed loop [deg] */
 	int32_t prev_cl, prev_cr;
 	int have_prev;
+	float x_m;		/* odometry: distance travelled since BALANCING began [m] */
+	float psi_rad;		/* heading from the yaw gyro [rad]                         */
+	float hold_x;		/* position-hold anchor [m]                                */
+	float still_s;		/* time the car has been commanded to stand still [s]      */
+	int hold_active;
 } bc_ctrl_t;
 
 typedef struct {
@@ -36,6 +41,8 @@ typedef struct {
 	float out_l, out_r;	/* motor demand [%], +/-motor_max, deadband-compensated,
 				   BEFORE motor_sign                  */
 	int saturated;		/* angle loop at its limit     */
+	float x_m, psi_rad;	/* odometry                    */
+	int hold_active;	/* position hold engaged       */
 } bc_ctrl_out_t;
 
 void bc_ctrl_init(bc_ctrl_t *c, const bc_params_t *p);

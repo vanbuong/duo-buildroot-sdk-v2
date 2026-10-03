@@ -261,11 +261,11 @@ failure. Unknown commands increment `status.lost_cmds`.
 | Offset | Size | Writer | Content |
 |--------|------|--------|---------|
 | 0x0000 | 64 B | RTOS (once, magic last) | `magic 'BCSM'`, `version`, `size`, `boot_count`, `build_id[16]` |
-| 0x0040 | 64 B | RTOS | status: `rtos_heartbeat` (10 Hz), `state`, `fault`, `deadline_miss`, `imu_err`, `cpu_load_pct` (not measured yet, 0), `telem_head`, `event_head`, `cycles`, `lost_cmds`, `stack_min[4]` |
+| 0x0040 | 64 B | RTOS | status: `rtos_heartbeat` (10 Hz), `state`, `fault`, `deadline_miss`, `imu_err`, `cpu_load_pct` (load of the `bc_ctrl` task = execution time / period, smoothed; **not** whole-CPU load because the idle hook is not enabled), `imu_variant` (0 unknown, 1 MPU6050, 2 MPU6500 family), `telem_head`, `event_head`, `cycles`, `lost_cmds`, `stack_min[4]` |
 | 0x0080 | 64 B | **Linux** | `linux_heartbeat` (10 Hz), `linux_flags` |
 | 0x0100 | ≤ 1 KiB | **Linux** | parameter block (seqlock): `seq`, `crc32`, `version`, `size`, `bc_params_t` |
 | 0x0500 | ≤ 256 B | RTOS | parameter echo (what is actually in use): `seq`, `applied_count`, `last_result`, `applied_seq`, `bc_params_t` |
-| 0x0600 | 512 B | – | calibration block (reserved; calibration results are reported through the event ring today) |
+| 0x0600 | 512 B | RTOS | calibration block (seqlock): `seq`, `valid`, `gyro_bias[3]` (°/s), `accel_mean[3]` (g), `trim_deg`, `temp_c`; written after boot calibration and after every runtime calibration; read by `Shm.read_calib()`, shown in `bcctl status` and `/api/status` |
 | 0x0800 | 16 KiB | RTOS | telemetry ring: 256 × 64 B at 50 Hz (≈ 5 s of history) |
 | 0x4800 | 4 KiB | RTOS | event ring: 128 × 32 B (state changes, commands, parameter results, calibration) |
 | 0x5800 | 42 KiB | – | reserved |
@@ -293,7 +293,7 @@ wrap, parameter block) and the Python↔C interop tests.
 
 ### 6.4 Parameter block (single source of truth) [now]
 
-All fields are 32-bit; list, ranges and defaults come from one X-macro in `include/bc_params.h`
+All fields are 32-bit (43 parameters; the table lists them in the order of the struct); list, ranges and defaults come from one X-macro in `include/bc_params.h`
 (`bc_params_t`, `bc_param_table`, validation). Board-level sign overrides live in `board_pins.h`
 (`BC_BOARD_*_SIGN`); every value can be changed at run time from Linux (`bcctl set`, WebSocket `param`).
 
@@ -334,6 +334,14 @@ All fields are 32-bit; list, ranges and defaults come from one X-macro in `inclu
 | `motor_sign_r` | sign | 1 | -1 … 1 |  |
 | `enc_sign_l` | sign | 1 | -1 … 1 |  |
 | `enc_sign_r` | sign | 1 | -1 … 1 |  |
+| `est_mode` | int | 0 | 0 … 1 | 0 = gated complementary, 1 = robust Kalman |
+| `est_spike_deg` | float | 20.0 | 0.0 … 90.0 | accel-angle spike rejection [deg], 0 = off |
+| `kf_q_angle` | float | 0.001 | 1e-06 … 1.0 | Kalman process noise, angle |
+| `kf_q_bias` | float | 0.003 | 1e-06 … 1.0 | Kalman process noise, gyro bias |
+| `kf_r` | float | 3.0 | 0.0001 … 10.0 | Kalman measurement noise [deg²], inflated with the innovation |
+| `kf_robust_deg` | float | 3.0 | 0.0 … 30.0 | innovation scale of the robust inflation [deg] |
+| `x_kp` | float | 0.0 | 0.0 … 3.0 | position-hold gain [1/s], 0 = off |
+| `x_vmax` | float | 0.15 | 0.02 … 1.0 | position-hold speed cap [m/s] |
 
 Defaults are the simulation-derived starting point from [04](04-pid-and-motion-control.md); they are *not* tuned
 on a real chassis.
@@ -370,7 +378,7 @@ Outputs by state: `BALANCING` → PID outputs; every other state → `tb6612_coa
 |-------|-----------|--------|----------|
 | `FALL` | `|pitch| > 45°` | coast, STBY=0, → FALLEN | no (auto re-arm optional) |
 | `LIFT` | wheel speed > `lift_speed_mps` for 200 ms while `|pitch| < 10°`, or both wheels saturate | coast | until DISARM |
-| `IMU_BUS` | I2C error 3 cycles in a row | coast, FAULT, try bus recovery | until DISARM |
+| `IMU_BUS` | I2C error 3 cycles in a row | coast, FAULT, bus recovery (≤ 9 SCL clocks + STOP, once per second while not balancing, then IMU re-init; unverified on hardware) | until DISARM |
 | `IMU_STUCK` | identical 14-byte frame ×20 | same | until DISARM |
 | `IMU_RANGE` | gyro raw at ±32767 for >3 cycles; accel norm outside 0.5–1.5 g for >100 ms | same | until DISARM |
 | `SATURATION` | `|u| ≥ out_max` continuously > `sat_ms` | coast | until DISARM |

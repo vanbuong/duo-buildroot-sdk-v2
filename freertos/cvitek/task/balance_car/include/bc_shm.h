@@ -51,7 +51,8 @@ typedef struct {
 	uint32_t cycles;		/* control cycles executed               */
 	uint32_t lost_cmds;
 	uint32_t stack_min_words[4];
-	uint32_t reserved[2];
+	uint32_t imu_variant;		/* mpu_variant_t: 0 unknown, 1 MPU6050, 2 MPU6500 family */
+	uint32_t reserved[1];
 } bc_shm_status_t;			/* 64 B */
 
 /* --- Linux-written, its own cache line ---------------------------------- */
@@ -100,7 +101,9 @@ typedef struct {
 	int32_t enc_l, enc_r;
 	uint16_t vbat_mv, exec_us, period_us;
 	uint8_t state, fault, imu_err, flags;
-	uint8_t pad[10];
+	int16_t psi_mrad;		/* heading from the yaw gyro [mrad]       */
+	int32_t x_mm;			/* odometry distance [mm]                 */
+	uint8_t pad[4];
 	uint32_t crc;			/* crc32 over bytes 4..59                 */
 } bc_telem_t;
 
@@ -253,6 +256,28 @@ static inline void bc_param_echo_write(volatile bc_shm_t *s,
 	BC_FENCE();
 	e->seq = (seq | 1u) + 1u;
 	BC_SHM_CLEAN(e, sizeof(*e));
+}
+
+/* Publish the calibration block (seqlock; RTOS is the only writer). */
+static inline void bc_calib_publish(volatile bc_shm_t *s, const float gyro_bias[3],
+				    const float accel_mean[3], float trim_deg, float temp_c)
+{
+	volatile bc_calib_t *c = &s->calib;
+	uint32_t seq = c->seq;
+	int i;
+
+	c->seq = seq | 1u;
+	BC_FENCE();
+	for (i = 0; i < 3; i++) {
+		c->gyro_bias[i] = gyro_bias[i];
+		c->accel_mean[i] = accel_mean[i];
+	}
+	c->trim_deg = trim_deg;
+	c->temp_c = temp_c;
+	c->valid = 1;
+	BC_FENCE();
+	c->seq = (seq | 1u) + 1u;
+	BC_SHM_CLEAN(c, sizeof(*c));
 }
 
 /* ---- Linux side (also used by host tests) ------------------------------- */

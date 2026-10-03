@@ -45,6 +45,8 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(c["telem_enc_l"], pos + 24)
         self.assertEqual(c["telem_vbat"], pos + 24 + 8)
         self.assertEqual(c["telem_state"], pos + 24 + 8 + 6)
+        self.assertEqual(c["telem_psi"], pos + 24 + 8 + 6 + 4)
+        self.assertEqual(c["telem_x"], pos + 24 + 8 + 6 + 4 + 2)
         self.assertEqual(c["telem_crc"], 60)
         self.assertEqual(c["event_val"], 12)
 
@@ -55,6 +57,7 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(c["status_telem_head"], idx["telem_head"])
         self.assertEqual(c["status_event_head"], idx["event_head"])
         self.assertEqual(c["status_lost_cmds"], idx["lost_cmds"])
+        self.assertEqual(c["status_imu_variant"], idx["imu_variant"])
 
     def test_parameter_table_identical(self):
         self.assertEqual(self.c["param_count"], L.PARAM_COUNT)

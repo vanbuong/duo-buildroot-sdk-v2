@@ -119,6 +119,8 @@ static void publish_telemetry(const bc_core_out_t *o, const bc_core_in_t *in,
 	t.enc_r = in->enc_r;
 	t.exec_us = (uint16_t)(exec_us > 65535 ? 65535 : exec_us);
 	t.period_us = (uint16_t)(period_us > 65535 ? 65535 : period_us);
+	t.psi_mrad = s16(o->ctl.psi_rad * 1000.0f);
+	t.x_mm = (int32_t)(o->ctl.x_m * 1000.0f);
 	t.state = (uint8_t)o->state;
 	t.fault = (uint8_t)o->fault;
 	t.imu_err = (uint8_t)(imu_err > 255 ? 255 : imu_err);
@@ -156,6 +158,14 @@ static int calibrate_trim(float *trim_out, TickType_t *last)
 	return (fabsf(*trim_out) <= 15.0f) ? 0 : -2;
 }
 
+static void publish_calibration(volatile bc_shm_t *shm, float trim_deg)
+{
+	mpu60x0_scaled_t sc;
+
+	mpu60x0_scale(&g_imu, &sc);
+	bc_calib_publish(shm, g_imu.gyro_bias, g_imu.accel_mean, trim_deg, sc.temp_c);
+}
+
 static void balance_ctrl_task(void *arg)
 {
 	volatile bc_shm_t *shm = BC_SHM();
@@ -170,6 +180,8 @@ static void balance_ctrl_task(void *arg)
 	bc_core_out_t out = { 0 };
 	int zeroed = 0, hb_lost = 0;
 	float v_t = 0.0f, w_t = 0.0f;
+	uint32_t last_recover = 0;
+	float cpu_load = 0.0f;
 
 	(void)arg;
 	load_default_params(&g_params);
@@ -177,7 +189,11 @@ static void balance_ctrl_task(void *arg)
 	bc_cmd_init(&g_cmd, bc_now_ms());
 	bc_param_echo_write(shm, &g_params, 0, 0);
 
-	if (mpu60x0_init(&g_imu, BC_MPU_I2C_ID, BC_MPU_ADDR) != 0) {
+	int init_rc = mpu60x0_init(&g_imu, BC_MPU_I2C_ID, BC_MPU_ADDR);
+
+	shm->status.imu_variant = (uint32_t)g_imu.variant;
+	BC_SHM_CLEAN(&shm->status, sizeof(shm->status));
+	if (init_rc != 0) {
 		boot_events[0] = BC_EV_IMU_INIT_FAIL;
 		bc_event_push(shm, bc_now_us(), BC_EVT_LOG_CALIB, BC_CALIB_GYRO, -1);
 	} else {
@@ -185,6 +201,8 @@ static void balance_ctrl_task(void *arg)
 
 		boot_events[0] = BC_EV_CALIB_REQ;
 		boot_events[1] = rc == 0 ? BC_EV_CALIB_OK : BC_EV_CALIB_FAIL;
+		if (rc == 0)
+			publish_calibration(shm, g_params.trim_deg);
 		bc_event_push(shm, bc_now_us(), BC_EVT_LOG_CALIB, BC_CALIB_GYRO, rc);
 	}
 
@@ -226,6 +244,20 @@ static void balance_ctrl_task(void *arg)
 		rc = mpu60x0_read(&g_imu);
 		if (rc == 0)
 			mpu60x0_scale(&g_imu, &sc);
+		/* A dead bus is only repaired while the car is not balancing (the
+		 * recovery blocks for ~100 us per attempt; the IMU stays faulted until
+		 * the operator clears the fault). Retried at most once per second. */
+		if (g_core.health.bus_fail && out.state != BC_ST_BALANCING &&
+		    out.state != BC_ST_ARMING && (cycle - last_recover) >= BC_CTRL_HZ) {
+			last_recover = cycle;
+			if (board_i2c_bus_recover() == 0 &&
+			    mpu60x0_init(&g_imu, BC_MPU_I2C_ID, BC_MPU_ADDR) == 0) {
+				shm->status.imu_variant = (uint32_t)g_imu.variant;
+				bc_event_push(shm, bc_now_us(), BC_EVT_LOG_CALIB, BC_CALIB_GYRO, 1);
+			}
+			last = xTaskGetTickCount();
+			t_prev = bc_now_us();
+		}
 
 		/* --- commands from Linux --- */
 		bc_rt_get_cmd(&spd, &trn, &tgt_ms, &mb_hb, &mb_ms);
@@ -303,6 +335,8 @@ static void balance_ctrl_task(void *arg)
 						bc_param_echo_write(shm, &np2, 0, 0);
 					}
 				}
+				if (r == 0)
+					publish_calibration(shm, g_params.trim_deg);
 				ci.events = (r == 0) ? BC_EV_CALIB_OK : BC_EV_CALIB_FAIL;
 				bc_core_step(&g_core, &ci, &co);
 				bc_event_push(shm, bc_now_us(), BC_EVT_LOG_CALIB, (uint16_t)cal, r);
@@ -330,6 +364,10 @@ static void balance_ctrl_task(void *arg)
 		shm->status.fault = (uint32_t)out.fault;
 		shm->status.imu_err = imu_err;
 		shm->status.cycles = cycle;
+		/* load of THIS task (execution / period, smoothed over ~50 cycles); the
+		 * idle hook is not enabled, so it is not whole-CPU load. */
+		cpu_load += 0.02f * (100.0f * (float)exec_us / (float)(period_us ? period_us : 1u) - cpu_load);
+		shm->status.cpu_load_pct = (uint32_t)(cpu_load + 0.5f);
 		if ((cycle % HB_DIV) == 0) {
 			shm->status.rtos_heartbeat = ++rtos_hb;
 			shm->status.stack_min_words[0] = (uint32_t)uxTaskGetStackHighWaterMark(NULL);

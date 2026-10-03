@@ -77,6 +77,14 @@ SYMS=$(riscv64-unknown-elf-nm "$ELF")
 if [ "$CHIP" = cv181x ]; then
     grep -q " _bc_shm_base$" <<<"$SYMS" || { echo "_bc_shm_base missing"; exit 1; }
     grep -E " _bc_shm_base$| _end$" <<<"$SYMS"
+    # firmware size budget: the image (text+data+bss up to _end) must leave at least
+    # 256 KiB of the 2 MiB carve-out free below the shared window (heap/stack growth)
+    END=$(awk '$3=="_end"{print $1}' <<<"$SYMS")
+    BASE=$((0x9FE00000))
+    USED=$(( 0x$END - BASE ))
+    BUDGET=$(( 2*1024*1024 - 64*1024 - 256*1024 ))
+    echo "firmware footprint: $USED bytes (budget $BUDGET)"
+    [ "$USED" -le "$BUDGET" ] || { echo "firmware too large for budget"; exit 1; }
     grep -q " prvBalanceCommTask$" <<<"$SYMS" || { echo "balance comm task not linked"; exit 1; }
 else
     if grep -q " balance_car_start$" <<<"$SYMS"; then

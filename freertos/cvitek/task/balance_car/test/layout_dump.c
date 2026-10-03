@@ -34,6 +34,9 @@ int main(void)
 	P("telem_enc_l", offsetof(bc_telem_t, enc_l));
 	P("telem_vbat", offsetof(bc_telem_t, vbat_mv));
 	P("telem_state", offsetof(bc_telem_t, state));
+	P("telem_psi", offsetof(bc_telem_t, psi_mrad));
+	P("telem_x", offsetof(bc_telem_t, x_mm));
+	P("status_imu_variant", offsetof(bc_shm_status_t, imu_variant));
 	P("telem_crc", offsetof(bc_telem_t, crc));
 	P("status_heartbeat", offsetof(bc_shm_status_t, rtos_heartbeat));
 	P("status_telem_head", offsetof(bc_shm_status_t, telem_head));

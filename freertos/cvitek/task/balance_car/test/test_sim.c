@@ -32,6 +32,7 @@ typedef struct {
 	double max_theta_deg;
 	double tail_theta_deg;		/* max |theta| over the last second   */
 	double max_x_m;
+	double final_x_m;		/* signed position at the end         */
 	double tail_speed_mps;
 	int fell;			/* core went to FALLEN/FAULT after release */
 	int released;			/* reached BALANCING                  */
@@ -203,6 +204,7 @@ static sim_res_t run_sim(const sim_cfg_t *c)
 		}
 	}
 	(void)n_after; (void)total;
+	r.final_x_m = pl.x;
 	r.released = saw_bal;
 	r.seq_ok = order_ok && saw_calib && saw_idle && saw_arming && saw_bal;
 	r.final_state = out.state;
@@ -245,6 +247,24 @@ static void sim_default_params_balance_across_plant_gains(void)
 	}
 }
 
+static void sim_kalman_mode_balances_across_plant_gains(void)
+{
+	const double kus[] = { 0.02, 0.05, 0.1, 0.2 };
+	size_t i;
+
+	for (i = 0; i < sizeof(kus) / sizeof(kus[0]); i++) {
+		sim_cfg_t c = cfg_default();
+		sim_res_t r;
+
+		c.p.est_mode = 1;
+		c.ku = kus[i];
+		r = run_sim(&c);
+		CHECK(!r.fell);
+		CHECK(r.tail_theta_deg < 3.0);
+		CHECK(r.max_x_m < 1.5);
+	}
+}
+
 static void sim_tolerates_sensor_noise(void)
 {
 	sim_cfg_t c = cfg_default();
@@ -265,6 +285,23 @@ static void sim_recovers_from_push(void)
 	r = run_sim(&c);
 	CHECK(!r.fell);
 	CHECK(r.tail_theta_deg < 3.0);
+}
+
+static void sim_position_hold_stays_stable_and_bounded(void)
+{
+	sim_cfg_t c = cfg_default();
+	sim_res_t off, on;
+
+	c.theta0_deg = 0.0; c.push_at_s = 2.0; c.push_rad_s = 0.6;
+	c.seconds = 12.0;
+	off = run_sim(&c);
+	c.p.x_kp = 0.5f;
+	on = run_sim(&c);
+	CHECK(!off.fell && !on.fell);
+	printf("  drift without hold %.3f m, with hold %.3f m\n", off.final_x_m, on.final_x_m);
+	CHECK(fabs(on.final_x_m) <= fabs(off.final_x_m) + 0.02);
+	CHECK(fabs(on.final_x_m) < 0.5);
+	CHECK(on.tail_theta_deg < 3.0);
 }
 
 static void sim_starts_from_larger_lean(void)
@@ -344,8 +381,10 @@ void suite_sim(void)
 	printf("suite closed-loop simulation (real bc_core)\n");
 	RUN(sim_startup_sequence_and_arming_time);
 	RUN(sim_default_params_balance_across_plant_gains);
+	RUN(sim_kalman_mode_balances_across_plant_gains);
 	RUN(sim_tolerates_sensor_noise);
 	RUN(sim_recovers_from_push);
+	RUN(sim_position_hold_stays_stable_and_bounded);
 	RUN(sim_starts_from_larger_lean);
 	RUN(sim_speed_loop_stable_up_to_4_deg_per_mps);
 	RUN(sim_speed_gain_magnitude_limit);

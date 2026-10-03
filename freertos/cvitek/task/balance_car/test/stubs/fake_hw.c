@@ -20,6 +20,8 @@ static uint8_t g_regs[256];
 static int g_fail_reads;
 static int g_writes;
 static void (*g_read_hook)(void);
+static uint8_t g_ignore[256];
+void fake_i2c_ignore_writes(uint8_t reg, int ignore) { g_ignore[reg] = (uint8_t)!!ignore; }
 void fake_i2c_set_read_hook(void (*hook)(void)) { g_read_hook = hook; }
 
 void fake_i2c_reset(void)
@@ -28,6 +30,7 @@ void fake_i2c_reset(void)
 	g_fail_reads = 0;
 	g_writes = 0;
 	g_read_hook = 0;
+	memset(g_ignore, 0, sizeof(g_ignore));
 }
 void fake_i2c_set_reg(uint8_t reg, uint8_t val) { g_regs[reg] = val; }
 uint8_t fake_i2c_get_reg(uint8_t reg) { return g_regs[reg]; }
@@ -56,7 +59,8 @@ int poll_i2c_write(uint8_t bus_id, uint8_t addr, uint8_t reg,
 
 	(void)bus_id; (void)addr;
 	for (i = 0; i < len; i++)
-		g_regs[(uint8_t)(reg + i)] = data[i];
+		if (!g_ignore[(uint8_t)(reg + i)])
+			g_regs[(uint8_t)(reg + i)] = data[i];
 	g_writes++;
 	return 0;
 }

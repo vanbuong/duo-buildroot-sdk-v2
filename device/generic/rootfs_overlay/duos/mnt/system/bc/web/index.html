@@ -36,6 +36,7 @@
       <tr><td>Speed L / R [m/s]</td><td id="speed">–</td></tr>
       <tr><td>Motor drive [%]</td><td id="u">–</td></tr>
       <tr><td>Loop period / exec [µs]</td><td id="timing">–</td></tr>
+      <tr><td>Distance / heading [m / rad]</td><td id="odo">–</td></tr>
       <tr><td>Wi-Fi RSSI [dBm]</td><td id="rssi">–</td></tr>
       <tr><td>RTOS alive / lost records</td><td id="alive">–</td></tr>
     </table>
@@ -60,6 +61,9 @@
     <button onclick="setParam()">Set</button> <button class="sec" onclick="send({t:'save'})">Save</button>
     <datalist id="plist"></datalist>
     <div id="msg" class="muted"></div>
+    <div>Video profile <select id="vprof" onchange="send({t:'video',profile:this.value})">
+      <option value="auto">auto (follow Wi-Fi)</option><option>fpv-low</option><option>fpv-med</option>
+      <option>fpv-hq</option><option>mjpeg</option></select> <span class="muted" id="vinfo"></span></div>
     <div class="muted">Video: open <code id="rtsp"></code> in VLC/ffplay.</div>
   </div>
 </div>
@@ -77,6 +81,7 @@ function connect() {
     else if (m.t === 'state') msg.textContent = 'state → ' + m.state + (m.fault !== 'NONE' ? ' (' + m.fault + ')' : '');
     else if (m.t === 'param_result') msg.textContent = m.k + ': ' + (m.ok ? 'ok' : 'rejected - ' + m.msg);
     else if (m.t === 'params') { plist.innerHTML = Object.keys(m.params).map(k => '<option value="' + k + '">').join(''); }
+    else if (m.t === 'video') { vinfo.textContent = m.profile + ' ' + m.width + 'x' + m.height + '@' + m.fps + ' ' + m.bitrate_kbps + 'kbps'; }
     else if (m.t === 'error') msg.textContent = m.msg;
   };
 }
@@ -86,6 +91,7 @@ function showTel(m) {
   fault.textContent = m.fault === 'NONE' ? '' : 'fault: ' + m.fault;
   pitch.textContent = m.pitch.toFixed(2) + '°'; pitchacc.textContent = m.pitch_acc.toFixed(2) + '°';
   speed.textContent = m.vl.toFixed(2) + ' / ' + m.vr.toFixed(2); u.textContent = m.u.toFixed(1);
+  odo.textContent = m.x.toFixed(2) + ' / ' + m.psi.toFixed(2);
   timing.textContent = m.period_us + ' / ' + m.exec_us;
   rssi.textContent = m.rssi === null ? '–' : m.rssi; alive.textContent = (m.rtos ? 'yes' : 'NO') + ' / ' + m.lost;
   hist.push(m.pitch); if (hist.length > 300) hist.shift(); draw();

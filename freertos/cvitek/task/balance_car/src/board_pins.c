@@ -4,6 +4,8 @@
 #include "pinctrl.h"
 #include "mmio.h"
 #include "printf.h"
+#include "delay.h"
+#include "i2c_recover.h"
 
 #define CVI_CLKGEN_BASE	0x03002000UL
 #define CVI_CLK_EN_1	0x004
@@ -43,4 +45,55 @@ void board_pins_init(void)
 
 	printf("[balance] DuoS pins remuxed (PWM1/2, VIVO->GPIO, IMU on I2C%d)\n",
 	       BC_MPU_I2C_ID);
+}
+
+/*
+ * I2C bus recovery: temporarily mux the IMU bus pads to GPIO, bit-bang up to 9
+ * clocks (open drain emulated with direction: output-low = 0, input = release;
+ * the module's pull-ups provide the high level), then give the pads back to the
+ * I2C block. Not yet verified on hardware.
+ */
+#if BC_MPU_I2C_ID == 0
+#define REC_SCL		GPIOA_PIN(28)
+#define REC_SDA		GPIOA_PIN(29)
+#else
+#define REC_SCL		GPIOC_PIN(3)
+#define REC_SDA		GPIOC_PIN(2)
+#endif
+
+static void rec_drive(int pin, int level)
+{
+	if (level) {
+		gpio_direction_input(pin);
+	} else {
+		gpio_set_value(pin, 0);
+		gpio_direction_output(pin, 0);
+	}
+}
+static void rec_scl(void *c, int l) { (void)c; rec_drive(REC_SCL, l); }
+static void rec_sda(void *c, int l) { (void)c; rec_drive(REC_SDA, l); }
+static int rec_sda_read(void *c) { (void)c; return gpio_get_value(REC_SDA) ? 1 : 0; }
+static void rec_delay(void *c, unsigned us) { (void)c; udelay(us); }
+
+int board_i2c_bus_recover(void)
+{
+	bc_i2c_recover_ops_t ops = { 0, rec_scl, rec_sda, rec_sda_read, rec_delay };
+	int clocks = 0, rc;
+
+#if BC_MPU_I2C_ID == 0
+	PINMUX_CONFIG(IIC0_SCL, XGPIOA_28);
+	PINMUX_CONFIG(IIC0_SDA, XGPIOA_29);
+#else
+	PINMUX_CONFIG(PAD_MIPIRX4P, XGPIOC_3);
+	PINMUX_CONFIG(PAD_MIPIRX4N, XGPIOC_2);
+#endif
+	rc = bc_i2c_recover(&ops, &clocks);
+#if BC_MPU_I2C_ID == 0
+	hal_pinmux_config(PINMUX_I2C0);
+#else
+	hal_pinmux_config(PINMUX_I2C1);
+#endif
+	printf("[balance] I2C%d bus recovery: %d clocks, %s\n", BC_MPU_I2C_ID, clocks,
+	       rc == 0 ? "SDA released" : "SDA STILL LOW");
+	return rc;
 }

@@ -76,6 +76,35 @@ largest single contributor to the loop's execution time and it is a busy-wait. N
 | Interrupt | **not implemented** (the 1 kHz output makes the sample ≤ 1 ms old, which is enough) – data-ready on a spare GPIO is optional | Lets the ISR timestamp the sample exactly. The simpler alternative is the 1 kHz output above. |
 | Temperature | read bytes 6–7 (already in the burst) | Used for gyro bias drift monitoring (§5.3). |
 
+### 2.2a MPU6050 and MPU6500 variants, and why the on-chip DSP is not used **[now]**
+
+`mpu60x0_init()` reads `WHO_AM_I` **first** and picks the register map and conversion constants from it
+(`mpu_variant_t`, stored in `imu->variant` and published to Linux as `status.imu_variant`: 0 unknown, 1 MPU6050,
+2 MPU6500 family):
+
+| `WHO_AM_I` | Part | Variant | Differences handled |
+|-----------|------|---------|---------------------|
+| 0x68 | MPU6050 (and MPU6000) | 6050 | accel DLPF is shared with `CONFIG`; temperature = raw/340 + 36.53 |
+| 0x70, 0x71, 0x73 | MPU6500, MPU9250, MPU9255 | 6500 | extra `ACCEL_CONFIG2` (0x1D) = 0x03; temperature = raw/333.87 + 21 |
+| 0x12, 0xAF, 0x98 | ICM-20602, ICM-20608, ICM-20689 | 6500 | same register layout as the 6500 |
+| anything else | clone / unknown | 6050 map, **warning printed** | the init read-back check below still protects against a wrong map |
+
+Init sequence (all of it covered by `mpu_init_*` host tests against a fake register file):
+device reset (`PWR_MGMT_1 = 0x80`, 100 ms) → signal-path reset (`0x68` write 0x07, 100 ms) → wake with PLL clock →
+write **and read back** `CONFIG`, `GYRO_CONFIG`, `ACCEL_CONFIG`, `SMPLRT_DIV`, `PWR_MGMT_1`. A register that does not
+take the value returns `-2` (wrong or faulty part, bus noise) and the core goes to the IMU-init fault instead of
+balancing on a half-configured sensor. A clone that ignores `ACCEL_CONFIG2` only produces a warning (wider accel bandwidth,
+still safe because of the norm gate and spike filter). The two variants then behave identically for the control code:
+same ±500 °/s, ±2 g, 1 kHz output, ≈ 42 Hz DLPF.
+
+**Built-in "DSP" – deliberately not used.** Both chips contain a *Digital Motion Processor* (DMP) and a digital low-pass
+filter. The **DLPF is used** (`CONFIG = 0x03`). The **DMP is not**: it only runs a firmware blob that InvenSense
+distributes as a proprietary binary (MotionApps / eMPL; the MPU6500 needs a different blob), it is loaded over I2C at every boot,
+its 200 Hz-limited quaternion output has a fixed internal filter we cannot tune or gate, and the estimator needs the *raw*
+accelerometer (for the norm gate and spike filter) and gyro anyway. A fusion filter on the C906L costs a few µs per cycle
+[est], so the DMP would add a licence/boot-time/debug burden without a benefit. If the DMP is ever wanted, it fits behind the
+`variant` switch as a third `est_mode`.
+
 Keep reading the whole 14-byte block: accel (6) + temp (2) + gyro (6) in one transaction guarantees the
 samples belong together.
 
@@ -171,7 +200,7 @@ accelerometer is the long-term reference; the design goal is to *use it slowly a
 
 Cost: ≈ 25 flops + one `atan2f`, `sqrtf` – a few µs on the C906 FPU **[est]**; negligible next to the I2C read.
 
-### 3.3 2-state Kalman filter (angle + gyro bias) – **not implemented**, optional
+### 3.3 2-state Kalman filter (angle + gyro bias) **[now, optional: `est_mode = 1`]**
 
 State `x = [θ, b]ᵀ`, input `u = ω_meas`:
 
@@ -183,11 +212,23 @@ Update:    S = P00 + R ;  K = [P00/S, P10/S]ᵀ ;  y = θ_acc − θ
            P ← (I − K H) P ,  H = [1, 0]
 ```
 
-Typical starting values (to be tuned on logged data): `Qθ = 0.001`, `Qb = 0.003`, `R = 0.03`
-(R scales with the accel noise² and can be *inflated* when the norm gate fails, e.g. `R = 10`). Benefits:
-automatic bias tracking and covariance-aware weighting. Cost: ≈ 60 flops. Recommendation: implement the
-gated complementary filter first (simple, testable); keep the Kalman as an A/B option behind a build/run
-flag, selected by data from the tuning logs.
+Parameters (run-time, doc 04 §7): `kf_q_angle = 0.001`, `kf_q_bias = 0.003`, `kf_r = 3.0` (deg²), `kf_robust_deg = 3.0`.
+**Robust update:** the measurement noise is inflated with the innovation, `R = kf_r·(1 + (y/kf_robust_deg)²)`, so an
+accelerometer that is wrong by many degrees (the car's own acceleration, a bump) is down-weighted smoothly instead of
+being fed straight into the angle. This was needed: with a plain constant R the Kalman mode fell in the closed-loop
+simulation at the highest plant gain, with the robust R it balances across all four simulated plant gains. The same two
+gates as for the complementary filter (norm gate, spike filter) still run in front of it. Host tests: convergence,
+bias tracking, gate, covariance stays positive over 10⁶ steps, agreement with the complementary filter within 1°, and a
+closed-loop run (`sim_kalman_mode_balances_across_plant_gains`).
+**Default stays `est_mode = 0` (gated complementary filter)**: it is simpler and the simulation shows no benefit from the
+Kalman filter. Choose by experiment on logged real data.
+
+### 3.3a Spike filter **[now]**
+
+Before either filter, an accelerometer angle that jumps more than `est_spike_deg` (default 20°) away from the current
+estimate is rejected (`est.spikes` counts them; `0` disables the filter). To stop the filter from locking out forever after a
+real change of attitude (e.g. the car is picked up and put down), a run of 200 consecutive rejected samples is accepted
+anyway. Tests: `est_spike_*`, lock-out escape, filter off.
 
 ### 3.4 Time base
 
@@ -241,7 +282,7 @@ polls (deterministic, still loses nothing as long as the sample rate ≥ 4× max
 reading the I2C sensor from a lower-priority context. Acceptance: **no count loss** in the bench test with
 a signal generator at the maximum edge rate (test `HIL-02`).
 
-### 4.4 Wheel speed and odometry [now: speed; plan: odometry]
+### 4.4 Wheel speed and odometry **[now]**
 
 ```
 Δc_L = cL[k] − cL[k−1]              (int32 subtraction is wrap-safe)
@@ -253,8 +294,10 @@ x += v·dt    (distance, for position hold / drive-distance commands)
 ψ += ω_gyro_z·dt            (heading from gyro Z; encoders only as a slow correction)
 ```
 
-Units: the firmware currently feeds **counts/s** into the speed PID, which is why its gains look
-unusual (`SPEED_KP 0.05 °` per count/s). Converting to m/s makes gains physically meaningful (doc 04 §3).
+`x` and `ψ` are integrated in `bc_ctrl` (zeroed while not balancing), published in telemetry as `x_mm` / `psi_mrad` and shown
+in the web page. Heading from the gyro drifts with the residual Z bias; it is meant for short manoeuvres, not navigation.
+
+Units: the speed loop works in **m/s** (the first firmware version fed counts/s, which made its gains non-physical and ~500× too large; see doc 06 findings).
 
 ## 5. Calibration
 
@@ -301,7 +344,7 @@ if the accel norm gate regularly rejects a still robot; then store `offset[3]` a
 | Saturation | `|raw gyro| ≥ 32 700` for > 3 cycles | **[now]** `FAULT_IMU_RANGE` |
 | Accel norm | `‖a‖ ∉ [0.5, 1.5] g` for > 100 ms / 500 ms | **[now]** warn flag at 100 ms, `FAULT_IMU_RANGE` at 500 ms (the estimator's gate separately ignores the accelerometer when `|‖a‖−1| > 0.1 g`) |
 | Spikes | `|θ[k] − θ[k−1]| > 10°` in one cycle | **not implemented** |
-| Bus recovery | toggle SCL 9× as GPIO, re-init | **not implemented** (the fault stays until `DISARM` + a good read; `poll_i2c` has a timeout so the task cannot hang) |
+| Bus recovery | toggle SCL 9× as GPIO, re-init | **[now]** while not balancing/arming, `board_i2c_bus_recover()` runs at most once per second after `bus_fail`: pads → GPIO, ≤ 9 SCL clocks until SDA is released, STOP, pads back to I2C, then the IMU is re-initialised. Pure logic is host-tested (`i2c_recover.c`); **the pad/GPIO mapping is unverified on hardware**. The fault itself still needs `DISARM` + a good read to clear. |
 | Re-init | on `DISARM` | clears the fault if the sensor answers again |
 
 The earlier firmware executed `continue` before the motor update on a failed read (stale PWM); that is fixed: the state
@@ -327,4 +370,7 @@ machine leaves `BALANCING` and the actuator step forces coast.
 | IMU health: stuck, saturation, norm window, bus-error policy | `health_*` (5 tests, `FLT-01..04`) |
 | Quadrature decode | six `encoder_*` tests |
 | End-to-end through the fake I2C register file: wheel acceleration leaking into the accelerometer, noise, push, unplug | closed-loop `sim_*` tests (real `bc_core` + real MPU driver) |
-| Not covered: Kalman (not implemented), spike filter, bus recovery, encoder IRQ on hardware (`HIL-02`) | – |
+| IMU variants: table of ids, each 6500-family id, 6050 leaves 0x1D alone, unknown id, reset sequence, read-back mismatch → -2, clone ignoring `ACCEL_CONFIG2`, bus error, temperature per variant | `mpu_variant_*`, `mpu_init_*` (9 new tests) |
+| Spike filter, Kalman filter | `est_spike_*`, `est_kalman_*`, `sim_kalman_mode_balances_across_plant_gains` |
+| I2C bus recovery (pure clocking logic against a fake bus) | `i2c_recover_*` (4 tests) |
+| Not covered (needs hardware): the recovery on the real pads, the encoder IRQ (`HIL-02`), real sensor noise/vibration | – |

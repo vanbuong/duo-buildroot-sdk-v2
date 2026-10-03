@@ -67,19 +67,19 @@ tools/                    gen_bc_layout.py  rtos_build_check.sh  dts_check.sh
 ```
 
 Run: `make -C freertos/cvitek/task/balance_car/test test` (needs only a C compiler and libm/pthread) and `… pytest`.
-Current result: **107 C tests / 513 checks and 57 Python tests, all passing**; clean under AddressSanitizer + UBSan (gcc);
-line coverage `pid` 92 %, `encoder` 100 %, `mpu60x0` 91 %, `bc_params` 96 %, `estimator` 97 %, `control` 99 %, `bc_state` 99 %,
-`imu_health` 100 %, `bc_cmd` 100 %, `bc_core` 90 %.
+Current result: **135 C tests / 659 checks and 71 Python tests, all passing**; clean under AddressSanitizer + UBSan (gcc);
+line coverage `pid` 92 %, `encoder` 100 %, `mpu60x0` 94 %, `bc_params` 96 %, `estimator` 99 %, `control` 99 %, `bc_state` 99 %,
+`imu_health` 100 %, `bc_cmd` 100 %, `bc_core` 90 %, `i2c_recover` 100 %.
 
-### 3.1 C inventory (107 tests)
+### 3.1 C inventory (135 tests)
 
 | Suite | Tests | What it proves | Plan IDs |
 |-------|-------|----------------|----------|
 | `test_pid.c` (10) | proportional, clamp, integral + anti-windup, derivative, **setpoint kick (documents the generic form)**, reset, dt guard, **rate-form (no kick)**, **rate-form P/clamp**, **I-limit in output units + freeze** | PID mathematics | `UT-PID-01..07`, `CTL-01`, `CTL-03` |
 | `test_encoder.c` (6) | 4× decode, signed counting, no spurious counts, bounce, **skipped state dropped (the under-sampling failure mode)**, reset | quadrature decode | `UT-ENC-01..06` |
-| `test_mpu.c` (10) | 6050/6500 register setup (±500 °/s, 1 kHz, `ACCEL_CONFIG2`), scale constants tied to the registers, big-endian decode, bus error, scaling + bias, 3-axis calibration, **motion rejected, bad gravity rejected**, calibration bus error | IMU driver | `UT-MPU-*` |
+| `test_mpu.c` (19) | **variant table and every 6500-family id, reset sequence, read-back mismatch → -2, clone ignoring `ACCEL_CONFIG2`, unknown id, bus error on `WHO_AM_I`, temperature per variant**, 6050/6500 register setup (±500 °/s, 1 kHz, `ACCEL_CONFIG2`), scale constants tied to the registers, big-endian decode, bus error, scaling + bias, 3-axis calibration, **motion rejected, bad gravity rejected**, calibration bus error | IMU driver | `UT-MPU-*` |
 | `test_params.c` (7) | defaults valid, **every field rejects out-of-range/NaN**, set-by-name, sign fields ±1 only, first-bad-field report, dense 32-bit layout, CRC-32 vector | parameter set | `SHM-03` (C side) |
-| `test_estimator.c` (8) | init from accel, convergence, gyro integration, **accel gate**, zero vector finite, **bias tracking**, bias frozen while gated, sign flip | estimator | `EST-01..04` |
+| `test_estimator.c` (16) | **spike filter (reject/count/escape/off), Kalman (convergence, bias, gate, covariance over 10⁶ steps, agreement with the complementary filter)**, init from accel, convergence, gyro integration, **accel gate**, zero vector finite, **bias tracking**, bias frozen while gated, sign flip | estimator | `EST-01..04` |
 | `test_control.c` (13) | counts→m/s, slew, deadband table, zero drive upright, **angle PD formula + sign**, trim, saturation, **speed loop leans back when moving forward**, encoder sign, target clamp/slew, turn, **mixer keeps balance drive over turn**, reset | controller | `CTL-01..06` |
 | `test_state.c` (21) | calibration/arming flow, 1 s upright window and restart, timeout, refusal with IMU fault, fall, fallen recovery, each IMU fault, fault needs clean sensor, saturation (long vs short), lift (and *not* lift while leaning), timing fault, **ESTOP latch**, disarm, motors only in BALANCING, names | state machine | `ST-01`, `ST-02`, `SAF-01/04/05/07` (logic) |
 | `test_health_cmd.c` (11) | stuck frame, gyro saturation, norm window, bus-error policy, target pack/unpack, state pack, clamp, **watchdog zeroes targets (never disarms)**, stale target, hb-disarm + wraparound | `imu_health`, `bc_cmd`, `bc_proto` | `FLT-01..04`, `CMD-01/02` |
@@ -105,12 +105,14 @@ system-identification step in doc 04 §12 and the HIL/field levels below.
 | `test_shm_interop.py` (10) | header/telemetry/events **written by the real C code, read by Python**; CRC validation and corruption; ring overrun; parameters **written by Python, validated and echoed by the real C code**; corrupt block rejected; Python validation = C ranges; heartbeat visible to C; mailbox packing/ioctl number | cross-language compatibility |
 | `test_bcd.py` (21) | heartbeat ticks, clamp + dead-man, commands, ESTOP ordering, **parameter push confirmed by the real RTOS C code**, invalid values never sent, timeout, save/load, **emergency when the RTOS heartbeat freezes (fires once, re-arms)**, telemetry JSON, event JSON, message handling, **real WebSocket round trip (RFC 6455 accept example, ping/pong, bad JSON)**, client disconnect → dead-man, HTTP endpoints, framing edge cases | `bcd` |
 | `test_camera.py` (11) | selection table, J1/J2/both/none/forced, **IMX219 reported as unsupported**, missing ini, dry run, sysfs GPIO writes, ini names exist in the SDK overlay | `bc_camera` |
+| `test_i2c_recover.c` (4) | free bus → STOP only; slave releasing after n clocks; give up after 9 clocks (bounded time); null counter | I2C bus recovery logic |
+| `test_log_video.py` (13) | JSONL logger rotation/size bound/never raises (found a real bug: telemetry `pad` bytes were not serialisable), video profile save/load/env, adaptive-rate hysteresis and manual override, bcd `video` message/broadcast, odometry in telemetry JSON, calibration block read from the C writer | logging + video profiles |
 | `test_bcctl_scripts.py` (9) | `bcctl` status/events/get/set rejection; shell scripts parse; Python modules compile; **`duo-init.sh` does not load the PWM module and starts the services; DTS release `&i2c4`/`&spi3`**; web UI uses the protocol | CLI + integration files |
 
 Quality gates: **line coverage ≥ 85 % per file** (`make coverage`); every `FAULT_*` has a test (`st_names_exist_for_every_value`
 plus the individual cases above).
 
-Still to add: a unit test per new `FAULT_*` when one is introduced; spike filter and bus recovery (not implemented).
+Still to add: a unit test per new `FAULT_*` when one is introduced. Spike filter and bus-recovery logic are now covered; the bus recovery on real pads is a hardware test (`HIL-06`).
 
 ## 4. L4 – hardware-in-the-loop (bench) **[plan]**
 
@@ -212,17 +214,18 @@ and DTS, `docs/balance_car/**` or the workflow; manual dispatch.
 
 | Job | What | Gate |
 |-----|------|------|
-| `unit` matrix: gcc, gcc + ASan/UBSan, clang | `make test` (`-std=c99 -Wall -Wextra -Werror`) – 107 tests | any failure or warning |
-| `coverage` | `make coverage` – ten source files ≥ 85 % lines; uploads `.gcov` | below threshold |
-| `pytest` | `make pytest` (builds `layout_dump`/`shm_tool`, runs 57 tests) and `gen_bc_layout.py --check` | any failure, or generated layout out of date |
-| `fw-build` matrix: `cv181x` DuoS, `cv180x` Duo | `tools/rtos_build_check.sh`: **real RTOS image build** with the Ubuntu RISC-V GCC + picolibc (T-Head CSR names patched in a scratch copy), fails on any warning in `task/balance_car`, checks `_bc_shm_base`/`prvBalanceCommTask` are linked for cv181x and that `balance_car_start` is **not** linked for cv180x | build failure, warning, missing symbol |
+| `unit` matrix: gcc, gcc + ASan/UBSan, clang | `make test` (`-std=c99 -Wall -Wextra -Werror`) – 135 tests | any failure or warning |
+| `coverage` | `make coverage` – eleven source files ≥ 85 % lines; uploads `.gcov` | below threshold |
+| `pytest` | `make pytest` (builds `layout_dump`/`shm_tool`, runs 71 tests) and `gen_bc_layout.py --check` | any failure, or generated layout out of date |
+| `fw-build` matrix: `cv181x` DuoS, `cv180x` Duo | `tools/rtos_build_check.sh`: **real RTOS image build** with the Ubuntu RISC-V GCC + picolibc (T-Head CSR names patched in a scratch copy), fails on any warning in `task/balance_car`, checks `_bc_shm_base`/`prvBalanceCommTask` are linked for cv181x, enforces a **firmware size budget** (footprint up to `_end` ≤ 2 MiB − 64 KiB window − 256 KiB headroom; currently ≈ 0.8 MB), and that `balance_car_start` is **not** linked for cv180x | build failure, warning, missing symbol |
 | `dts` | `tools/dts_check.sh`: cpp + `dtc` on the four DuoS device trees | any parse error |
+| `cppcheck` (report only, `continue-on-error`) | static analysis of the pure-logic modules; becomes a gate once the first run is clean | – |
 | `docs` | `docs/balance_car/check_links.py` | broken link |
 
-All of these were run locally (gcc, gcc+ASan/UBSan, clang, coverage, both RTOS builds, all four DTS, pytest); clang with
-sanitizers is not in the matrix because the authoring sandbox lacks its runtime. **The workflow itself has not run on
-GitHub yet** – the first run is the real verification; the Ubuntu 24.04 package names for the RISC-V toolchain
-(`gcc-riscv64-unknown-elf`, `picolibc-riscv64-unknown-elf`) are the ones that worked in the sandbox.
+All of these were run locally (gcc, gcc+ASan/UBSan, clang, coverage, both RTOS builds, all four DTS, pytest). The workflow ran on
+GitHub for the previous head and was green (31 checks including the SDK's own full image builds); the jobs added in the latest
+change (`cppcheck`, size budget, new tests) are verified by their first run. clang with sanitizers is not in the matrix because
+the authoring sandbox lacks its runtime.
 
 What `fw-build` does *not* prove: it uses a different toolchain/libc than the SDK's (`milkv-duo/host-tools`), so the
 SDK's own `ci.yml` builds remain the authoritative full-image check.
@@ -255,10 +258,10 @@ SDK's own `ci.yml` builds remain the authoritative full-image check.
 
 ```sh
 T=freertos/cvitek/task/balance_car
-make -C $T/test test                  # 107 C tests (unit + closed-loop simulation)
+make -C $T/test test                  # 135 C tests (unit + closed-loop simulation)
 make -C $T/test clean test SAN=1      # same under AddressSanitizer + UBSan
 make -C $T/test clean coverage        # per-file line coverage gate
-make -C $T/test pytest                # 57 Python tests (builds the C helper tools first)
+make -C $T/test pytest                # 71 Python tests (builds the C helper tools first)
 python3 $T/tools/gen_bc_layout.py --check
 $T/tools/dts_check.sh                 # four DuoS device trees (needs device-tree-compiler)
 $T/tools/rtos_build_check.sh          # RTOS image, cv181x (needs gcc-riscv64-unknown-elf + picolibc)

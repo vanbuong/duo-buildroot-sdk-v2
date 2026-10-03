@@ -58,12 +58,15 @@ int main(int argc, char **argv)
 			t.vbat_mv = 11800;
 			t.exec_us = 400;
 			t.period_us = 5000;
+			t.psi_mrad = (int16_t)(i % 100) - 50;
+			t.x_mm = (int32_t)i * 3;
 			t.state = 4;
 			t.fault = 0;
 			bc_telem_push(s, &t);
 		}
 		s->status.state = 4;
 		s->status.rtos_heartbeat = 77;
+		s->status.imu_variant = 2;
 	} else if (!strcmp(argv[1], "event") && argc > 3) {
 		n = (unsigned)atoi(argv[3]);
 		for (i = 0; i < n; i++)
@@ -84,6 +87,11 @@ int main(int argc, char **argv)
 		}
 		printf("rc=%d bad=%d seq=%u a_kp=%g imu_sign=%d\n", rc, bad, seq, rc ? 0.0 : (double)p.a_kp,
 		       rc ? 0 : p.imu_sign);
+	} else if (!strcmp(argv[1], "calib")) {
+		const float gb[3] = { 0.5f, -1.25f, 2.0f };
+		const float am[3] = { 0.01f, -0.02f, 0.998f };
+
+		bc_calib_publish(s, gb, am, 1.75f, 31.5f);
 	} else if (!strcmp(argv[1], "status")) {
 		printf("magic=%08x heartbeat=%u telem_head=%u event_head=%u state=%u\n", s->hdr.magic,
 		       s->status.rtos_heartbeat, s->status.telem_head, s->status.event_head, s->status.state);

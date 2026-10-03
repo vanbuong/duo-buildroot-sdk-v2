@@ -22,6 +22,12 @@
 	X(est_alpha,      F, 0.998f, 0.90f,  0.9999f) /* complementary gyro weight */ \
 	X(est_gate_g,     F, 0.10f,  0.0f,   1.0f)    /* accel norm gate, 0 = off  */ \
 	X(est_bias_gain,  F, 0.02f,  0.0f,   1.0f)    /* online gyro bias, 1/s     */ \
+	X(est_mode,       I, 0,      0,      1)       /* 0 complementary, 1 Kalman */ \
+	X(est_spike_deg,  F, 20.0f,  0.0f,   90.0f)   /* reject accel angle this far from the prediction, 0 = off */ \
+	X(kf_q_angle,     F, 0.001f, 0.000001f, 1.0f) /* Kalman process noise, angle */ \
+	X(kf_q_bias,      F, 0.003f, 0.000001f, 1.0f) /* Kalman process noise, bias  */ \
+	X(kf_r,           F, 3.0f,   0.0001f, 10.0f)  /* Kalman accel measurement noise [deg^2] */ \
+	X(kf_robust_deg,  F, 3.0f,   0.0f,   30.0f)   /* innovation scale that inflates R (horizontal acceleration twists the accel direction without changing |a|), 0 = off */ \
 	X(a_kp,           F, 15.0f,  3.5f,   60.0f)   /* % per deg                 */ \
 	X(a_kd,           F, 0.8f,   0.0f,   5.0f)    /* % per (deg/s)             */ \
 	X(a_ki,           F, 0.0f,   0.0f,   5.0f)    /* % per (deg*s)             */ \
@@ -31,6 +37,8 @@
 	X(v_ki,           F, 1.94f,  0.0f,   8.0f)    /* deg per m                 */ \
 	X(v_max_deg,      F, 8.0f,   0.0f,   20.0f)   /* speed loop lean limit     */ \
 	X(v_filter,       F, 0.3f,   0.01f,  1.0f)    /* wheel speed low-pass      */ \
+	X(x_kp,           F, 0.0f,   0.0f,   3.0f)    /* position hold gain [1/s] (m error -> m/s), 0 = off */ \
+	X(x_vmax,         F, 0.15f,  0.02f,  1.0f)    /* position-hold speed correction limit [m/s] */ \
 	X(t_kp,           F, 5.0f,   0.0f,   30.0f)   /* % per (rad/s) yaw rate    */ \
 	X(t_ki,           F, 5.0f,   0.0f,   30.0f)   \
 	X(t_max,          F, 20.0f,  0.0f,   50.0f)   /* turn authority %          */ \

@@ -21,7 +21,9 @@ import threading
 import time
 
 import bc_layout as L
+import bc_log
 import bc_shm as S
+import bc_video as V
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 DEADMAN_S = 0.3
@@ -52,7 +54,7 @@ class DevMemGpio:
 
 class Bcd:
     def __init__(self, shm, mbox, params_path=None, emergency=None, log=print,
-                 clock=time.monotonic):
+                 clock=time.monotonic, logger=None, video_path=None):
         self.shm = shm
         self.mbox = mbox
         self.params_path = params_path
@@ -75,6 +77,42 @@ class Bcd:
         self.stop_flag = threading.Event()
         self.threads = []
         self.link_rssi = None
+        self.logger = logger                # bc_log.TelemLogger or None
+        self.video_path = video_path        # where the chosen profile is stored, or None
+        self.video = V.AdaptiveRate(V.load(video_path) if video_path else V.DEFAULT)
+
+    # -- video profile ----------------------------------------------------
+    def video_info(self):
+        d = V.profile_dict(self.video.profile)
+        d["auto"] = self.video.auto
+        return d
+
+    def set_video(self, profile):
+        """profile name, or "auto" to resume adaptive control. Returns reply dict."""
+        if profile == "auto":
+            self.video.set_auto()
+        else:
+            try:
+                self.video.set_manual(profile)
+            except ValueError as exc:
+                return {"t": "error", "msg": str(exc)}
+        self._store_video()
+        return dict(self.video_info(), t="video")
+
+    def _store_video(self):
+        if self.video_path:
+            try:
+                V.save(self.video.profile, self.video_path)
+            except OSError as exc:
+                self.log("video profile not saved: %s" % exc)
+
+    def adapt_video(self, rssi, lost):
+        new = self.video.update(rssi, lost)
+        if new:
+            self._store_video()
+            self.log("video profile -> %s (rssi=%s)" % (new, rssi))
+            self.broadcast(json.dumps(dict(self.video_info(), t="video")))
+        return new
 
     # -- commands ---------------------------------------------------------
     def arm(self):
@@ -219,6 +257,7 @@ class Bcd:
                 "fault": faults[r["fault"]] if r["fault"] < len(faults) else "?",
                 "period_us": r["period_us"], "exec_us": r["exec_us"],
                 "vbat": r["vbat_mv"] / 1000.0, "rssi": rssi, "lost": lost,
+                "x": r["x_mm"] / 1000.0, "psi": r["psi_mrad"] / 1000.0,
                 "rtos": alive}
 
     @staticmethod
@@ -263,10 +302,13 @@ class Bcd:
                 recs = self.poll_telemetry()
                 for r in recs:
                     n += 1
+                    if self.logger:
+                        self.logger.write(r)
                     if n % 3 == 0:            # 50 Hz ring -> ~17 Hz to clients
                         lost = self.telem.lost if self.telem else 0
                         if n % 60 == 0:
                             self.link_rssi = self.read_rssi()
+                            self.adapt_video(self.link_rssi, lost)
                         self.broadcast(json.dumps(self.tel_json(
                             r, lost, self.link_rssi, bool(self.rtos_alive))))
 
@@ -301,6 +343,8 @@ class Bcd:
             return {"t": "saved"}
         elif t == "calib":
             self.calibrate(msg.get("what", ""))
+        elif t == "video":
+            return self.set_video(msg.get("profile", ""))
         elif t == "params":
             return {"t": "params", "params": self.current_params()}
         elif t == "ping":
@@ -390,7 +434,8 @@ class WsServer:
         path = path.split("?")[0]
         if path == "/api/status":
             body = json.dumps({"status": self.bcd.shm.status(), "header": self.bcd.shm.header(),
-                               "rtos_alive": self.bcd.rtos_alive}).encode()
+                               "rtos_alive": self.bcd.rtos_alive, "calib": self.bcd.shm.read_calib(),
+                               "video": self.bcd.video_info()}).encode()
             ctype = "application/json"
         elif path in ("/", "/index.html") and self.static_dir:
             try:
@@ -508,6 +553,9 @@ def main():
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--params", default="/mnt/data/bc_params.json")
     ap.add_argument("--shm-file", help="use a file instead of /dev/mem (development)")
+    ap.add_argument("--log-dir", help="write telemetry as rotating JSON lines here (e.g. /mnt/data/bc_logs)")
+    ap.add_argument("--log-max-mb", type=float, default=2.0)
+    ap.add_argument("--video-config", default=V.CONFIG_PATH)
     ap.add_argument("--no-mailbox", action="store_true")
     ap.add_argument("--no-emergency", action="store_true")
     ap.add_argument("--web", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "web"))
@@ -530,7 +578,13 @@ def main():
             emergency = DevMemGpio().clear_stby
         except OSError as exc:
             log("emergency STBY path unavailable: %s" % exc)
-    bcd = Bcd(shm, mbox, args.params, emergency, log)
+    logger = None
+    if args.log_dir:
+        try:
+            logger = bc_log.TelemLogger(args.log_dir, int(args.log_max_mb * 1024 * 1024))
+        except OSError as exc:
+            log("telemetry log disabled: %s" % exc)
+    bcd = Bcd(shm, mbox, args.params, emergency, log, logger=logger, video_path=args.video_config)
     bcd.run_forever()
     if shm.ready():
         bcd.load_params()

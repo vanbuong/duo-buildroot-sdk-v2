@@ -67,13 +67,15 @@ void bc_ctrl_reset(bc_ctrl_t *c)
 	pid_reset(&c->pt);
 	c->v_t = c->w_t = c->v_f = c->theta_cmd = 0.0f;
 	c->have_prev = 0;
+	c->x_m = c->psi_rad = c->hold_x = c->still_s = 0.0f;
+	c->hold_active = 0;
 }
 
 void bc_ctrl_step(bc_ctrl_t *c, const bc_params_t *p,
 		  const bc_ctrl_in_t *in, bc_ctrl_out_t *out)
 {
 	float dt = in->dt > 0.0f ? in->dt : 0.005f;
-	float v_l, v_r, v, theta_set, u, turn, scale, tmax, w_meas;
+	float v_l, v_r, v, theta_set, u, turn, scale, tmax, w_meas, v_corr = 0.0f;
 
 	/* wheel speeds from encoder deltas */
 	if (!c->have_prev) {
@@ -94,8 +96,28 @@ void bc_ctrl_step(bc_ctrl_t *c, const bc_params_t *p,
 	c->w_t = bc_slew(c->w_t, clampf(in->w_target, -p->w_max, p->w_max),
 			 p->alpha_max * dt);
 
+	/* odometry (distance from the unfiltered wheel speeds, heading from the gyro) */
+	c->x_m += v * dt;
+	w_meas = in->omega_z * DEG2RAD * (float)p->imu_sign;
+	c->psi_rad += w_meas * dt;
+
+	/* position hold: once commanded to stand still and (nearly) stopped, pull the car
+	 * back to where it stopped. Adds a bounded speed correction to the speed target. */
+	if (p->x_kp > 0.0f && fabsf(in->v_target) < 0.01f) {
+		c->still_s += dt;
+		if (!c->hold_active && c->still_s > 0.5f && fabsf(c->v_f) < 0.05f) {
+			c->hold_x = c->x_m;
+			c->hold_active = 1;
+		}
+	} else {
+		c->still_s = 0.0f;
+		c->hold_active = 0;
+	}
+	if (c->hold_active)
+		v_corr = clampf(p->x_kp * (c->hold_x - c->x_m), -p->x_vmax, p->x_vmax);
+
 	/* outer loop: speed -> lean command (deg) */
-	c->theta_cmd = pid_update(&c->pv, c->v_t, c->v_f, dt);
+	c->theta_cmd = pid_update(&c->pv, c->v_t + v_corr, c->v_f, dt);
 
 	/* inner loop: angle PD with derivative on the gyro rate */
 	theta_set = p->trim_deg + c->theta_cmd;
@@ -103,7 +125,6 @@ void bc_ctrl_step(bc_ctrl_t *c, const bc_params_t *p,
 	out->saturated = fabsf(u) >= p->a_out_max - 0.5f;
 
 	/* turn loop on yaw rate; authority shrinks with speed */
-	w_meas = in->omega_z * DEG2RAD * (float)p->imu_sign;
 	scale = 1.0f / (1.0f + fabsf(c->v_f) / p->t_speed_scale);
 	tmax = p->t_max * scale;
 	c->pt.out_min = -tmax;
@@ -130,4 +151,7 @@ void bc_ctrl_step(bc_ctrl_t *c, const bc_params_t *p,
 	out->v_l = v_l;
 	out->v_r = v_r;
 	out->v_f = c->v_f;
+	out->x_m = c->x_m;
+	out->psi_rad = c->psi_rad;
+	out->hold_active = c->hold_active;
 }

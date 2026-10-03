@@ -8,7 +8,7 @@ LOG=/tmp/bc.log
 i=0
 while [ ! -e /dev/cvi-rtos-cmdqu ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
 
-python3 $BC/bcd.py >>$LOG 2>&1 &
+python3 $BC/bcd.py --log-dir /mnt/data/bc_logs >>$LOG 2>&1 &
 sh $BC/bc-net.sh >>$LOG 2>&1 &
 sleep 2
 sh $BC/bc-video.sh >>$LOG 2>&1 &

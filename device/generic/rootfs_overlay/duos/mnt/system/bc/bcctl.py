@@ -76,7 +76,7 @@ def main(argv=None):
 
     shm, mbox = open_all(args)
     if args.cmd == "status":
-        print(json.dumps({"header": shm.header(), "status": shm.status()}, indent=1))
+        print(json.dumps({"header": shm.header(), "status": shm.status(), "calib": shm.read_calib()}, indent=1))
     elif args.cmd == "watch":
         rd = S.TelemReader(shm)
         n = 0

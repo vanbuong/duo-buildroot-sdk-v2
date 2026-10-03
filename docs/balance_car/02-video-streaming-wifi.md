@@ -163,6 +163,8 @@ Linux PWM module the RTOS owns).
 ```
 bc-start.sh   waits for /dev/cvi-rtos-cmdqu, then starts (in this order):
 bcd.py        teleop + telemetry + parameters + heartbeat + emergency path  (:8080)
+              --log-dir /mnt/data/bc_logs: 50 Hz telemetry as rotating JSON lines (2 MB x 4 files)
+bc_log.py / bc_video.py   rotating logger / video profiles + adaptive rate
 bc-net.sh     Wi-Fi: STA from /mnt/data/bc_wifi.conf, power-save off, AP fallback if hostapd exists
 bc-video.sh   bc_camera.py (select J1/J2) -> RTSP server binary found under /mnt/system/usr/...
 bcctl.py      command line tool (works with or without bcd)
@@ -268,8 +270,8 @@ independently of the video.
 | V0 | `bc_camera.py`: probe/select J1 (GC2083) / J2 (OV5647), copy the ini, hold the unused sensor in reset | **done**, 11 tests with fake I2C/GPIO; chip ids and the Linux GPIO base (480 for GPIOA) **unverified on hardware**; probing needs MCLK running, otherwise the preferred connector is used |
 | V1 | Camera + RTSP server on DuoS with `fpv-med`, verify with `ffplay` | `bc-video.sh` starts the first RTSP binary it finds (`/mnt/system/usr/example/rtsp_server_video`, …); **not run**, binary arguments/URL unverified |
 | V2 | Validate Wi-Fi (STA script, power-save off, `iperf3` baselines) | `bc-net.sh` written; **not run** on a board |
-| V3 | AP mode | script falls back to an own AP **if `hostapd` is installed**; `BR2_PACKAGE_HOSTAPD=y` was deliberately **not** added to the defconfigs (cannot be verified without a full SDK build; add it when you want AP mode) |
-| V4 | Profile loader + adaptive rate | **not done** |
+| V3 | AP mode | script falls back to an own AP if `hostapd` is installed; **`BR2_PACKAGE_HOSTAPD=y` is now in the four DuoS defconfigs** (verified by the SDK's full image CI builds; AP bring-up itself not run on a board) |
+| V4 | Profile loader + adaptive rate | **done in software** (`bc_video.py`): profiles `fpv-low` 640×360@15/0.8 Mbit, `fpv-med` 1280×720@20/2, `fpv-hq` 1920×1080@25/4, `mjpeg`; stored in `/mnt/data/bc_video.json`; `bc-video.sh` exports them as `BC_VIDEO_*` environment variables; `bcd` steps the profile down after 2 bad samples (RSSI ≤ −75 dBm or >20 lost telemetry records) and up after 10 good ones (RSSI ≥ −62 dBm), broadcasts `{"t":"video",…}` and the web page has a selector (`auto` or fixed). 11 Python tests cover the decision logic. **Whether the RTSP binary honours these variables, and the real encoder reconfiguration, are unverified** – a change takes effect when the stream is restarted by the script. |
 | V5 | `bcd`: WebSocket, dead-man, telemetry | **done**, 21 tests incl. a real WebSocket round trip and a run against the C shm code |
 | V6 | Web UI | **done** (no embedded video) |
 | V7 | OSD overlay | **not done** |

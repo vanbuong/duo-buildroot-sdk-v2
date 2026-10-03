@@ -1,6 +1,9 @@
 /*
- * Attitude estimator (pitch) - docs/balance_car/03 section 3.2.
- * Gated complementary filter with online gyro-bias tracking. Pure math.
+ * Attitude estimator (pitch) - docs/balance_car/03 section 3.
+ * est_mode 0: gated complementary filter with online gyro-bias tracking.
+ * est_mode 1: 2-state Kalman filter (angle, gyro bias), same gate.
+ * Both reject accelerometer samples that jump away from the prediction
+ * (est_spike_deg). Pure math.
  */
 #ifndef BC_ESTIMATOR_H
 #define BC_ESTIMATOR_H
@@ -15,6 +18,10 @@ typedef struct {
 	float bias;		/* residual gyro bias estimate [deg/s]        */
 	int gated;		/* 1 = accel rejected this cycle              */
 	int initialized;
+	int spike;		/* 1 = accel sample rejected as a spike       */
+	int spike_run;		/* consecutive rejected samples               */
+	unsigned spikes;	/* total rejected samples                     */
+	float P[2][2];		/* Kalman covariance (mode 1)                 */
 } bc_est_t;
 
 void bc_est_reset(bc_est_t *e);

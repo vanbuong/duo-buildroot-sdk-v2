@@ -76,4 +76,7 @@
 
 void board_pins_init(void);
 
+/* Clock a stuck I2C slave free (<= 9 SCL pulses + STOP); 0 = SDA released. */
+int board_i2c_bus_recover(void);
+
 #endif /* BALANCE_BOARD_PINS_H */

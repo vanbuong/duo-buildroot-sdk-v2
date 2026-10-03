@@ -22,4 +22,6 @@ void fake_i2c_fail_reads(int fail);
 int  fake_i2c_write_count(void);
 /* called before every poll_i2c_read(); lets a test change registers over time */
 void fake_i2c_set_read_hook(void (*hook)(void));
+/* emulate a part that ignores writes to one register (e.g. ACCEL_CONFIG2 on a 6050) */
+void fake_i2c_ignore_writes(uint8_t reg, int ignore);
 #endif
