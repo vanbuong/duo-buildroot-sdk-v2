@@ -11,7 +11,7 @@ Existing firmware: `freertos/cvitek/task/balance_car` (MPU6050/6500, TB6612FNG, 
 | 02 | [Video streaming over Wi-Fi and teleoperation](02-video-streaming-wifi.md) | **Can it stream video over Wi-Fi?** Yes – on the A53 with the SDK's own camera/encoder/RTSP/AIC8800 stack; pipeline, profiles, protocol, latency budgets, failure handling |
 | 03 | [MPU handling and data-processing algorithms](03-imu-and-data-processing.md) | I2C and register configuration, decoding, attitude estimation (gated complementary filter / Kalman), encoder processing, calibration, fault detection |
 | 04 | [PID, balance algorithm and movement control](04-pid-and-motion-control.md) | Physics, cascaded controller, gains from first principles, movement commands, sign bring-up, tuning procedure, parameter table |
-| 05 | [Test plan, unit tests, CI](05-test-plan-and-ci.md) | Test pyramid, 135 implemented host tests, 71 Python tests, planned HIL/system/field tests, traceability, CI workflows |
+| 05 | [Test plan, unit tests, CI](05-test-plan-and-ci.md) | Test pyramid, 154 implemented host tests, 86 Python tests, planned HIL/system/field tests, traceability, CI workflows |
 | 06 | [Findings, roadmap, risks, decisions](06-development-roadmap.md) | Review findings on the current code, milestones M0–M8 with estimates, risk register, decision log |
 
 ## Architecture at a glance
@@ -35,16 +35,17 @@ under "Not done".
 
 | Area | Status | Verified by |
 |------|--------|-------------|
-| Control core: params (43), gated estimator + spike filter + optional robust Kalman, cascaded controller, odometry, optional position hold, state machine, IMU health, command watchdog | done | 135 host tests / 659 checks (gcc, gcc+ASan/UBSan, clang), coverage 90–100 % per file |
+| Control core: params (44), gated estimator + spike filter + optional robust Kalman + experimental DMP angle, cascaded controller, odometry, optional position hold, state machine, IMU health, command watchdog | done | 154 host tests / 745 checks (gcc, gcc+ASan/UBSan, clang), coverage 90–100 % per file |
 | Closed-loop simulation through the real core + MPU driver | done | `test_sim.c` (assumed plant!) |
 | RTOS firmware: blocking 200 Hz control task, IRQ encoders, IMU on I2C0, boot→IDLE, coast on fault, console task | done | real RTOS image builds in CI (cv181x with balance, cv180x without); **not run on hardware** |
 | Linux↔RTOS interface: `IP_BALANCE`, 64 KiB shared window (linker-asserted), seqlock rings, parameter block | done | host stress tests + Python↔C interop tests |
-| Linux side: `bcd` (teleop, heartbeat, dead-man, parameters, emergency STBY clear), `bcctl`, web UI | done | 71 Python tests incl. WebSocket round trip |
+| Linux side: `bcd` (teleop, heartbeat, dead-man, parameters, emergency STBY clear), `bcctl`, web UI | done | 86 Python tests incl. WebSocket round trip |
 | Two cameras, one at a time (`bc_camera.py`) | done | tests with fake I2C/GPIO; chip ids unverified |
 | Resource ownership: PWM module no longer loaded, `&i2c4`/`&spi3` disabled in the four DuoS DTS | done | `dtc` compile in CI |
 | CI: unit, coverage, pytest, layout drift, RTOS image, DTS, docs | done | green on GitHub |
 
-| IMU support: MPU6050 **and** MPU6500 family (6500/9250/ICM-20602/20608/20689) detected via `WHO_AM_I`, reset + read-back-verified init, DLPF used, DMP deliberately not used ([03 §2.2a](03-imu-and-data-processing.md)) | done | 9 variant tests against a fake register file |
+| IMU support: MPU6050 **and** MPU6500 family (6500/9250/ICM-20602/20608/20689) detected via `WHO_AM_I`, reset + read-back-verified init, DLPF used; DMP off by default ([03 §2.2a](03-imu-and-data-processing.md)) | done | 9 variant tests against a fake register file |
+| **Experimental** `est_mode 2`: DMP (MotionApps 6.12) angle cross-checked against the always-running filter, image supplied from a file on Linux ([03 §3.5](03-imu-and-data-processing.md)) | done in software, **off by default, never run on a chip** | 17 C tests, 2 closed-loop sims, 15 Python tests (incl. layout) |
 | I2C bus recovery, `bc_ctrl` load measurement, calibration block export, rotating telemetry log, video profiles + adaptive rate, `hostapd` in the DuoS defconfigs | done (software) | host/Python tests, full SDK image builds in CI; recovery pads and video effect unverified on hardware |
 | CI additions: firmware size budget, `cppcheck` (report only) | done | `balance-car-tests.yml` |
 
@@ -57,7 +58,7 @@ video profile variables, that the PWM block keeps its last state if the RTOS die
 STBY supervisor / battery sense, IMX219 sensor driver, Wi-Fi + video jitter test, HIL nightly runner.
 
 **Not hardware-dependent but deliberately not done:** hardware-timer-paced control and PWM update-in-place (real-time core changes,
-wait for measurements), mailbox events RTOS→Linux (the shm ring is used), OSD and embedded video in the web page, DMP use. Details in
+wait for measurements), mailbox events RTOS→Linux (the shm ring is used), OSD and embedded video in the web page, DMP as the default estimator. Details in
 [06 §10](06-development-roadmap.md).
 
 ## Key findings (history; details in docs 03, 04, 06)

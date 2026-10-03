@@ -9,13 +9,16 @@ SHM_VERSION = 1
 # offsets inside the window
 OFF_HDR, OFF_STATUS, OFF_LINUX = 0x0000, 0x0040, 0x0080
 OFF_PARAM, OFF_ECHO, OFF_CALIB = 0x0100, 0x0500, 0x0600
-OFF_TELEM, OFF_EVENTS = 0x0800, 0x4800
+OFF_TELEM, OFF_EVENTS, OFF_DMP = 0x0800, 0x4800, 0x6000
+DMP_DATA_MAX, DMP_KIND_612 = 4080, 612
+DMP_BLK_HDR_FMT = '<4I'       # seq, crc, kind, size; image bytes follow
+DMP_STATES = ('OFF', 'RUNNING', 'LOAD_FAILED', 'NO_IMAGE', 'LOST')
 TELEM_SLOTS, EVENT_SLOTS = 256, 128
 
 HDR_FMT = '<4I16s8I'
 STATUS_FIELDS = ('rtos_heartbeat', 'state', 'fault', 'deadline_miss', 'imu_err', 'cpu_load_pct',
                  'telem_head', 'event_head', 'cycles', 'lost_cmds', 'stack_min0', 'stack_min1',
-                 'stack_min2', 'stack_min3', 'imu_variant', 'reserved0')
+                 'stack_min2', 'stack_min3', 'imu_variant', 'dmp_info')
 STATUS_FMT = '<16I'
 CALIB_FIELDS = ('seq', 'valid', 'gyro_bias_x', 'gyro_bias_y', 'gyro_bias_z', 'accel_x', 'accel_y',
                 'accel_z', 'trim_deg', 'temp_c')
@@ -34,8 +37,9 @@ PARAMS = (
     ('est_alpha', 'F', 0.998, 0.9, 0.9999),
     ('est_gate_g', 'F', 0.1, 0.0, 1.0),
     ('est_bias_gain', 'F', 0.02, 0.0, 1.0),
-    ('est_mode', 'I', 0, 0, 1),
+    ('est_mode', 'I', 0, 0, 2),
     ('est_spike_deg', 'F', 20.0, 0.0, 90.0),
+    ('est_dmp_tol_deg', 'F', 8.0, 1.0, 45.0),
     ('kf_q_angle', 'F', 0.001, 1e-06, 1.0),
     ('kf_q_bias', 'F', 0.003, 1e-06, 1.0),
     ('kf_r', 'F', 3.0, 0.0001, 10.0),
@@ -106,6 +110,7 @@ BC_EVT_HEARTBEAT = 0x44
 BC_EVT_FAULT = 0x45
 BC_CALIB_GYRO = 1
 BC_CALIB_TRIM = 2
+BC_CALIB_DMP = 3
 
 STATE_NAMES = ('BOOT', 'CALIBRATING', 'IDLE', 'ARMING', 'BALANCING', 'FALLEN', 'FAULT', 'ESTOP')
 FAULT_NAMES = ('NONE', 'FALL', 'LIFT', 'IMU_BUS', 'IMU_STUCK', 'IMU_RANGE', 'SATURATION', 'TIMING',

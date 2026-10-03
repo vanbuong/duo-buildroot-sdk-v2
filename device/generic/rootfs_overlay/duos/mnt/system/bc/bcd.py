@@ -20,6 +20,7 @@ import struct
 import threading
 import time
 
+import bc_dmp
 import bc_layout as L
 import bc_log
 import bc_shm as S
@@ -54,7 +55,7 @@ class DevMemGpio:
 
 class Bcd:
     def __init__(self, shm, mbox, params_path=None, emergency=None, log=print,
-                 clock=time.monotonic, logger=None, video_path=None):
+                 clock=time.monotonic, logger=None, video_path=None, dmp_path=None):
         self.shm = shm
         self.mbox = mbox
         self.params_path = params_path
@@ -79,7 +80,34 @@ class Bcd:
         self.link_rssi = None
         self.logger = logger                # bc_log.TelemLogger or None
         self.video_path = video_path        # where the chosen profile is stored, or None
+        self.dmp_path = dmp_path            # packed DMP image to offer the RTOS, or None
+        self._dmp_boot = None
         self.video = V.AdaptiveRate(V.load(video_path) if video_path else V.DEFAULT)
+
+    # -- experimental DMP image hand-over ------------------------------------
+    def sync_dmp(self):
+        """Copy the packed image into the shared window once per RTOS boot (the window is
+        zeroed when the RTOS starts). Never raises; returns True when an image was written."""
+        if not self.dmp_path or not self.shm.ready():
+            return False
+        boot = self.shm.header()["boot_count"]
+        if boot == self._dmp_boot:
+            return False
+        self._dmp_boot = boot
+        try:
+            bc_dmp.write_image(self.shm, bc_dmp.load_file(self.dmp_path))
+        except FileNotFoundError:
+            return False
+        except (bc_dmp.DmpError, OSError) as exc:
+            self.log("DMP image not offered: %s" % exc)
+            return False
+        self.log("DMP image offered to the RTOS (use est_mode 2 to try it)")
+        return True
+
+    def dmp_info(self):
+        st = self.shm.status()
+        return {"state": bc_dmp.state_name(st), "fallbacks": bc_dmp.fallbacks(st),
+                "image": bc_dmp.read_image(self.shm) is not None}
 
     # -- video profile ----------------------------------------------------
     def video_info(self):
@@ -212,6 +240,7 @@ class Bcd:
         self.mbox.send(L.BC_CMD_SET_TARGET, S.pack_target(*tgt))
 
     def check_rtos(self):
+        self.sync_dmp()
         hb = self.shm.status()["rtos_heartbeat"]
         t = self.clock()
         if self.rtos_hb is None or hb != self.rtos_hb:
@@ -257,7 +286,7 @@ class Bcd:
                 "fault": faults[r["fault"]] if r["fault"] < len(faults) else "?",
                 "period_us": r["period_us"], "exec_us": r["exec_us"],
                 "vbat": r["vbat_mv"] / 1000.0, "rssi": rssi, "lost": lost,
-                "x": r["x_mm"] / 1000.0, "psi": r["psi_mrad"] / 1000.0,
+                "dmp": bool(r["flags"] & 16), "x": r["x_mm"] / 1000.0, "psi": r["psi_mrad"] / 1000.0,
                 "rtos": alive}
 
     @staticmethod
@@ -434,7 +463,7 @@ class WsServer:
         path = path.split("?")[0]
         if path == "/api/status":
             body = json.dumps({"status": self.bcd.shm.status(), "header": self.bcd.shm.header(),
-                               "rtos_alive": self.bcd.rtos_alive, "calib": self.bcd.shm.read_calib(),
+                               "rtos_alive": self.bcd.rtos_alive, "calib": self.bcd.shm.read_calib(), "dmp": self.bcd.dmp_info(),
                                "video": self.bcd.video_info()}).encode()
             ctype = "application/json"
         elif path in ("/", "/index.html") and self.static_dir:
@@ -556,6 +585,8 @@ def main():
     ap.add_argument("--log-dir", help="write telemetry as rotating JSON lines here (e.g. /mnt/data/bc_logs)")
     ap.add_argument("--log-max-mb", type=float, default=2.0)
     ap.add_argument("--video-config", default=V.CONFIG_PATH)
+    ap.add_argument("--dmp-image", default=bc_dmp.DEFAULT_PATH,
+                    help="packed MotionApps 6.12 image offered to the RTOS for est_mode 2 (optional)")
     ap.add_argument("--no-mailbox", action="store_true")
     ap.add_argument("--no-emergency", action="store_true")
     ap.add_argument("--web", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "web"))
@@ -584,7 +615,8 @@ def main():
             logger = bc_log.TelemLogger(args.log_dir, int(args.log_max_mb * 1024 * 1024))
         except OSError as exc:
             log("telemetry log disabled: %s" % exc)
-    bcd = Bcd(shm, mbox, args.params, emergency, log, logger=logger, video_path=args.video_config)
+    bcd = Bcd(shm, mbox, args.params, emergency, log, logger=logger, video_path=args.video_config,
+              dmp_path=args.dmp_image)
     bcd.run_forever()
     if shm.ready():
         bcd.load_params()

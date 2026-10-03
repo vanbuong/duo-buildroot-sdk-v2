@@ -141,4 +141,4 @@ jobs:
             --error-exitcode=1 --inline-suppr -Iinclude -Itest/stubs -DHOST_TEST \
             src/pid.c src/encoder.c src/mpu60x0.c src/bc_params.c src/estimator.c \
             src/control.c src/bc_state.c src/imu_health.c src/bc_cmd.c src/bc_core.c \
-            src/i2c_recover.c
+            src/i2c_recover.c src/dmp612.c

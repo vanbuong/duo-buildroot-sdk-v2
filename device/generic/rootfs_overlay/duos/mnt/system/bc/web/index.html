@@ -37,6 +37,7 @@
       <tr><td>Motor drive [%]</td><td id="u">–</td></tr>
       <tr><td>Loop period / exec [µs]</td><td id="timing">–</td></tr>
       <tr><td>Distance / heading [m / rad]</td><td id="odo">–</td></tr>
+      <tr><td>Angle source</td><td id="asrc">–</td></tr>
       <tr><td>Wi-Fi RSSI [dBm]</td><td id="rssi">–</td></tr>
       <tr><td>RTOS alive / lost records</td><td id="alive">–</td></tr>
     </table>
@@ -91,6 +92,7 @@ function showTel(m) {
   fault.textContent = m.fault === 'NONE' ? '' : 'fault: ' + m.fault;
   pitch.textContent = m.pitch.toFixed(2) + '°'; pitchacc.textContent = m.pitch_acc.toFixed(2) + '°';
   speed.textContent = m.vl.toFixed(2) + ' / ' + m.vr.toFixed(2); u.textContent = m.u.toFixed(1);
+  asrc.textContent = m.dmp ? 'DMP (experimental)' : 'raw filter';
   odo.textContent = m.x.toFixed(2) + ' / ' + m.psi.toFixed(2);
   timing.textContent = m.period_us + ' / ' + m.exec_us;
   rssi.textContent = m.rssi === null ? '–' : m.rssi; alive.textContent = (m.rtos ? 'yes' : 'NO') + ' / ' + m.lost;

@@ -24,4 +24,12 @@ int  fake_i2c_write_count(void);
 void fake_i2c_set_read_hook(void (*hook)(void));
 /* emulate a part that ignores writes to one register (e.g. ACCEL_CONFIG2 on a 6050) */
 void fake_i2c_ignore_writes(uint8_t reg, int ignore);
+
+/* --- DMP model: 12 banks of 256 B reachable through 0x6D/0x6E/0x6F (auto-increment),
+ *     and a FIFO behind 0x72/0x73/0x74. USER_CTRL (0x6A) bit 2 resets the FIFO. --- */
+uint8_t fake_dmp_mem_get(unsigned pos);
+void fake_dmp_mem_stuck(int pos);		/* writes to this memory byte are ignored (-1 = none) */
+void fake_fifo_push(const uint8_t *data, unsigned len);
+unsigned fake_fifo_len(void);
+int fake_fifo_resets(void);
 #endif

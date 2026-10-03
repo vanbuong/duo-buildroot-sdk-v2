@@ -36,6 +36,8 @@ typedef struct {
 	float dt;			/* s, measured                         */
 	uint32_t events;		/* BC_EV_*                             */
 	int timing_fault;
+	int dmp_valid;			/* fresh DMP packet this cycle (est_mode 2) */
+	float dmp_g[3];			/* gravity direction from the DMP [g]       */
 } bc_core_in_t;
 
 typedef struct {
@@ -46,6 +48,7 @@ typedef struct {
 	bc_ctrl_out_t ctl;
 	float theta, theta_acc, omega, norm;
 	int gated;
+	int dmp_used;			/* theta is the DMP angle this cycle   */
 } bc_core_out_t;
 
 void bc_core_init(bc_core_t *c, const bc_params_t *p);

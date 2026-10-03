@@ -52,6 +52,21 @@ static int mpu_read(mpu60x0_t *imu, uint8_t reg, uint8_t *buf, uint16_t len)
 	return poll_i2c_read(imu->i2c_id, imu->addr, reg, buf, len);
 }
 
+int mpu60x0_reg_write(mpu60x0_t *imu, uint8_t reg, uint8_t val) { return mpu_write8(imu, reg, val); }
+int mpu60x0_reg_read(mpu60x0_t *imu, uint8_t reg, uint8_t *buf, uint16_t len)
+{
+	return mpu_read(imu, reg, buf, len);
+}
+int mpu60x0_reg_write_n(mpu60x0_t *imu, uint8_t reg, const uint8_t *buf, uint16_t len)
+{
+	return poll_i2c_write(imu->i2c_id, imu->addr, reg, buf, len);
+}
+
+static float gyro_lsb(const mpu60x0_t *imu)
+{
+	return imu->gyro_lsb > 0.0f ? imu->gyro_lsb : MPU_GYRO_LSB_PER_DPS;
+}
+
 /* write + read back; 0 ok, -1 bus error, -2 mismatch */
 static int mpu_write_verify(mpu60x0_t *imu, uint8_t reg, uint8_t val, uint8_t mask)
 {
@@ -152,9 +167,9 @@ void mpu60x0_scale(const mpu60x0_t *imu, mpu60x0_scaled_t *out)
 	out->ax = imu->ax / MPU_ACCEL_LSB_PER_G;
 	out->ay = imu->ay / MPU_ACCEL_LSB_PER_G;
 	out->az = imu->az / MPU_ACCEL_LSB_PER_G;
-	out->gx = imu->gx / MPU_GYRO_LSB_PER_DPS - imu->gyro_bias[0];
-	out->gy = imu->gy / MPU_GYRO_LSB_PER_DPS - imu->gyro_bias[1];
-	out->gz = imu->gz / MPU_GYRO_LSB_PER_DPS - imu->gyro_bias[2];
+	out->gx = imu->gx / gyro_lsb(imu) - imu->gyro_bias[0];
+	out->gy = imu->gy / gyro_lsb(imu) - imu->gyro_bias[1];
+	out->gz = imu->gz / gyro_lsb(imu) - imu->gyro_bias[2];
 	/* datasheet conversions differ: MPU6050 T = raw/340 + 36.53, MPU6500 T = raw/333.87 + 21 */
 	if (imu->variant == MPU_VARIANT_6500)
 		out->temp_c = imu->temp / 333.87f + 21.0f;
@@ -176,9 +191,9 @@ int mpu60x0_calibrate(mpu60x0_t *imu, int samples)
 
 		if (mpu60x0_read(imu))
 			return -1;
-		g[0] = imu->gx / MPU_GYRO_LSB_PER_DPS;
-		g[1] = imu->gy / MPU_GYRO_LSB_PER_DPS;
-		g[2] = imu->gz / MPU_GYRO_LSB_PER_DPS;
+		g[0] = imu->gx / gyro_lsb(imu);
+		g[1] = imu->gy / gyro_lsb(imu);
+		g[2] = imu->gz / gyro_lsb(imu);
 		a[0] = imu->ax / MPU_ACCEL_LSB_PER_G;
 		a[1] = imu->ay / MPU_ACCEL_LSB_PER_G;
 		a[2] = imu->az / MPU_ACCEL_LSB_PER_G;

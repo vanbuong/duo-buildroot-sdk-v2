@@ -31,6 +31,7 @@
 
 #define BC_CALIB_GYRO		1
 #define BC_CALIB_TRIM		2
+#define BC_CALIB_DMP		3	/* event tag only: DMP image load/unload, val = result */
 
 static inline uint32_t bc_pack_target(int32_t speed_mmps, int32_t turn_mradps)
 {

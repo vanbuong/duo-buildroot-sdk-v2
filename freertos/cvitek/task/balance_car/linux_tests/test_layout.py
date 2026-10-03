@@ -58,6 +58,15 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(c["status_event_head"], idx["event_head"])
         self.assertEqual(c["status_lost_cmds"], idx["lost_cmds"])
         self.assertEqual(c["status_imu_variant"], idx["imu_variant"])
+        self.assertEqual(c["status_dmp_info"], idx["dmp_info"])
+
+    def test_dmp_block(self):
+        c = self.c
+        self.assertEqual(c["off_dmp"], L.OFF_DMP)
+        self.assertEqual(c["dmp_data"], struct.calcsize(L.DMP_BLK_HDR_FMT))
+        self.assertEqual(c["dmp_data_max"], L.DMP_DATA_MAX)
+        self.assertEqual(c["dmp_kind_612"], L.DMP_KIND_612)
+        self.assertEqual(L.OFF_DMP + c["dmp_data"] + c["dmp_data_max"], L.OFF_DMP + 0x1000)
 
     def test_parameter_table_identical(self):
         self.assertEqual(self.c["param_count"], L.PARAM_COUNT)

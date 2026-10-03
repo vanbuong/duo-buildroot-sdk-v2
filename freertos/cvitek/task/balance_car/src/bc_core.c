@@ -47,12 +47,13 @@ void bc_core_step(bc_core_t *c, const bc_core_in_t *in, bc_core_out_t *out)
 			     in->raw_gy, in->raw_gz,
 			     sqrtf(ax * ax + ay * ay + az * az), dt * 1000.0f);
 
+	bc_est_set_dmp(&c->est, in->imu_ok && in->dmp_valid, in->dmp_g);
 	if (!c->est.initialized)
 		bc_est_init_accel(&c->est, p, ax, ay, az);
 	else
 		bc_est_update(&c->est, p, ax, ay, az, gy, dt);
 
-	si.theta = c->est.theta;
+	si.theta = c->est.theta_out;
 	si.trim = p->trim_deg;
 	si.omega = c->est.omega;
 	si.v_f = c->ctl.v_f;
@@ -68,14 +69,15 @@ void bc_core_step(bc_core_t *c, const bc_core_in_t *in, bc_core_out_t *out)
 	out->state = c->sm.state;
 	out->fault = c->sm.fault;
 	out->motor_enable = bc_state_is_balancing(&c->sm);
-	out->theta = c->est.theta;
+	out->theta = c->est.theta_out;
+	out->dmp_used = c->est.dmp_used;
 	out->theta_acc = c->est.theta_acc;
 	out->omega = c->est.omega;
 	out->norm = c->est.norm;
 	out->gated = c->est.gated;
 
 	if (out->motor_enable) {
-		ci.theta = c->est.theta;
+		ci.theta = c->est.theta_out;
 		ci.omega = c->est.omega;
 		ci.omega_z = gz;
 		ci.enc_l = in->enc_l;

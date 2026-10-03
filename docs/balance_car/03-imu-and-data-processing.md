@@ -97,13 +97,12 @@ balancing on a half-configured sensor. A clone that ignores `ACCEL_CONFIG2` only
 still safe because of the norm gate and spike filter). The two variants then behave identically for the control code:
 same ±500 °/s, ±2 g, 1 kHz output, ≈ 42 Hz DLPF.
 
-**Built-in "DSP" – deliberately not used.** Both chips contain a *Digital Motion Processor* (DMP) and a digital low-pass
-filter. The **DLPF is used** (`CONFIG = 0x03`). The **DMP is not**: it only runs a firmware blob that InvenSense
-distributes as a proprietary binary (MotionApps / eMPL; the MPU6500 needs a different blob), it is loaded over I2C at every boot,
-its 200 Hz-limited quaternion output has a fixed internal filter we cannot tune or gate, and the estimator needs the *raw*
-accelerometer (for the norm gate and spike filter) and gyro anyway. A fusion filter on the C906L costs a few µs per cycle
-[est], so the DMP would add a licence/boot-time/debug burden without a benefit. If the DMP is ever wanted, it fits behind the
-`variant` switch as a third `est_mode`.
+**Built-in "DSP".** Both chips contain a *Digital Motion Processor* (DMP) and a digital low-pass filter. The **DLPF is used**
+(`CONFIG = 0x03`). The **DMP is off by default** and available only as the experimental `est_mode = 2` (§3.5): it runs an
+InvenSense firmware image that is loaded over I2C at every boot, its quaternion output has a fixed internal filter we cannot tune or
+gate, and the estimator needs the *raw* accelerometer (norm gate, spike filter) and gyro anyway. A fusion filter on the C906L costs a
+few µs per cycle [est], so the DMP is an experiment, not the baseline. The image is **not in this repository** (InvenSense origin,
+licence unclear): you pack it yourself from a library copy (§3.5).
 
 Keep reading the whole 14-byte block: accel (6) + temp (2) + gyro (6) in one transaction guarantees the
 samples belong together.
@@ -229,6 +228,48 @@ Before either filter, an accelerometer angle that jumps more than `est_spike_deg
 estimate is rejected (`est.spikes` counts them; `0` disables the filter). To stop the filter from locking out forever after a
 real change of attitude (e.g. the car is picked up and put down), a run of 200 consecutive rejected samples is accepted
 anyway. Tests: `est_spike_*`, lock-out escape, filter off.
+
+### 3.5 Experimental: DMP angle (`est_mode = 2`) **[now, off by default, never run on hardware]**
+
+**Which image.** Of the three MotionApps images in `ElectronicCats/mpu6050` (2.0: 1929 B / 42-byte packets, 6.12: 3062 B /
+28-byte packets, 4.1: 9-axis, needs a magnetometer) only **6.12** is supported: one image for both variants, 4.1 needs a compass we do not
+have, and 2.0 would need a second, larger init sequence (config and update tables). The Nordic `nrf52-quadcopter` repository contains
+the same lineage of images (its 4.1 image is byte-identical to ElectronicCats'; its 2.0 image differs in 38 bytes, and its DMP init calls
+are commented out), so it does not prove that a DMP runs on an MPU6500. **Whether the 6.12 image works on the 6500 family is untested and
+unverified** (my recollection is that InvenSense's eMD supports 6500/9250 with this image; the MPU6050 is what the library targets).
+
+**Delivery (no blob in git).**
+```
+bcctl dmp-pack MPU6050_6Axis_MotionApps612.cpp /mnt/data/bc_dmp612.bin   # parses dmpMemory[], checks size 3062 and crc32 0x386B78EE
+bcd                                                                       # copies the file into the shared window (0x6000, 4 KiB, seqlock + crc)
+bcctl set est_mode 2                                                      # while DISARMED; the RTOS loads the image
+bcctl dmp-status                                                          # OFF / RUNNING / LOAD_FAILED / NO_IMAGE / LOST, fallback count
+```
+`bcd` re-offers the image after every RTOS restart (the window is zeroed at boot). The CRC constant was computed from the library file
+in this session; an edited or truncated image is refused (`--force` overrides).
+
+**What the RTOS does** (`dmp612.c`, `balance_main.c`):
+* Only while **IDLE** (it blocks ~1 s like a calibration): device reset, register sequence of `dmpInitialize()` (SMPLRT_DIV 1, DLPF
+  188 Hz, accel ±2 g, **gyro ±2000 °/s – the DMP requires it**), image written in 16-byte chunks that never cross a 256-byte bank and
+  **read back and compared**, program start 0x0400, FIFO + DMP enabled. A failed load restores the normal raw configuration
+  (`LOAD_FAILED`); no image → `NO_IMAGE`. Leaving mode 2 re-initialises the chip for the raw path. A gyro calibration follows every switch because the
+  range changed (the raw scale uses `imu->gyro_lsb`, 16.4 instead of 65.5 LSB/°/s while the DMP is on).
+* Every cycle the FIFO is drained; the newest packet with a unit-length quaternion (`|q|² ∈ 0.81…1.21`) wins; a FIFO that is nearly
+  full or holds more than 8 packets is reset (stale data is worthless); no packet for 0.5 s → `LOST`.
+* The raw registers are still read every cycle (health checks, the gyro rate for the D term). The **complementary filter keeps running
+  independently**; `theta_out` (what the controller uses) is the DMP pitch computed from the quaternion's gravity vector with the same
+  formula and sign as the accelerometer angle, **only while it is within `est_dmp_tol_deg` (8°) of the filter**. A disagreement latches the
+  filter in charge for 1 s of continuous agreement before the DMP is trusted again (without the latch a frozen DMP flapped between two angles
+  and the car fell in simulation; with it the car survives, max lean 8.8°). Fallback cycles are counted in `status.dmp_info`, and telemetry flag
+  bit 4 says whether the DMP angle was used this cycle.
+
+**What is verified:** 17 host tests (image write/verify against a fake register file including memory that does not stick, wrong
+size, packet decode, quaternion check, gravity/pitch sign, FIFO partial/bad/overflow/lag/bus error, gyro scale switch, shared-memory block
+round trip + corruption, estimator mode 2 agree/disagree/missing/drift, core integration), two closed-loop simulations (good DMP balances;
+frozen DMP does not drop the car), 14 Python tests (plus a layout check) including cross-checks with the real C reader/writer. **What is not:** the register
+sequence on a real chip, the image on the MPU6500, the real FIFO rate/latency (a 100–200 Hz DMP stream adds latency compared with the
+1 kHz raw path – this may make mode 2 *worse* than mode 0), the `balance_main.c` state machine (RTOS glue, compiled in CI only), and the DMP's own
+no-motion gyro calibration interacting with ours. Treat mode 2 as a bench experiment with the wheels off the ground.
 
 ### 3.4 Time base
 

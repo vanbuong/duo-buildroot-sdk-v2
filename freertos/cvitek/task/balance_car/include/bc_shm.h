@@ -52,7 +52,7 @@ typedef struct {
 	uint32_t lost_cmds;
 	uint32_t stack_min_words[4];
 	uint32_t imu_variant;		/* mpu_variant_t: 0 unknown, 1 MPU6050, 2 MPU6500 family */
-	uint32_t reserved[1];
+	uint32_t dmp_info;		/* bits 0-7 BC_DMP_*, bits 8-31 DMP->filter fallbacks (saturating) */
 } bc_shm_status_t;			/* 64 B */
 
 /* --- Linux-written, its own cache line ---------------------------------- */
@@ -79,6 +79,24 @@ typedef struct {
 	uint32_t applied_seq;		/* param block seq that was applied      */
 	bc_params_t p;
 } bc_param_echo_t;
+
+/* --- Linux-written DMP firmware image (experimental est_mode 2) ---------- */
+#define BC_DMP_KIND_612		612	/* InvenSense MotionApps 6.12, 3062 bytes */
+#define BC_DMP_DATA_MAX		4080
+typedef struct {
+	uint32_t seq;			/* seqlock, Linux is the only writer      */
+	uint32_t crc;			/* crc32 over kind, size, data[size]      */
+	uint32_t kind;
+	uint32_t size;
+	uint8_t data[BC_DMP_DATA_MAX];
+} bc_dmp_blk_t;				/* 4096 B */
+
+/* status.dmp_info low byte */
+#define BC_DMP_OFF		0	/* not requested / raw-data path            */
+#define BC_DMP_RUNNING		1
+#define BC_DMP_LOAD_FAILED	2	/* image write/verify failed, fell back     */
+#define BC_DMP_NO_IMAGE		3	/* est_mode 2 requested but no valid image  */
+#define BC_DMP_LOST		4	/* FIFO stopped delivering packets          */
 
 /* --- RTOS-written calibration ------------------------------------------- */
 typedef struct {
@@ -135,7 +153,9 @@ typedef struct {
 	uint8_t pad3[0x800 - 0x600 - sizeof(bc_calib_t)];
 	bc_telem_t telem[BC_TELEM_SLOTS];		/* 0x0800 */
 	bc_event_t events[BC_EVENT_SLOTS];		/* 0x4800 */
-	uint8_t reserved[BC_SHM_SIZE - 0x5800];
+	uint8_t pad4[0x6000 - 0x5800];
+	bc_dmp_blk_t dmp;				/* 0x6000 */
+	uint8_t reserved[BC_SHM_SIZE - 0x7000];
 } bc_shm_t;
 
 _Static_assert(sizeof(bc_shm_hdr_t) == 64, "hdr");
@@ -154,6 +174,8 @@ _Static_assert(offsetof(bc_shm_t, echo) == 0x500, "echo off");
 _Static_assert(offsetof(bc_shm_t, calib) == 0x600, "calib off");
 _Static_assert(offsetof(bc_shm_t, telem) == 0x800, "telem off");
 _Static_assert(offsetof(bc_shm_t, events) == 0x4800, "events off");
+_Static_assert(sizeof(bc_dmp_blk_t) == 0x1000, "dmp blk");
+_Static_assert(offsetof(bc_shm_t, dmp) == 0x6000, "dmp off");
 
 /* ---- RTOS side ----------------------------------------------------------- */
 
@@ -302,6 +324,52 @@ static inline uint32_t bc_param_blk_write(volatile bc_param_blk_t *b,
 	BC_FENCE();
 	b->seq = seq + 1u;
 	return seq + 1u;
+}
+
+/* Writer for the DMP image block. Returns the new even sequence number, 0 if too big. */
+static inline uint32_t bc_dmp_blk_write(volatile bc_dmp_blk_t *b, uint32_t kind,
+					const uint8_t *data, uint32_t size)
+{
+	uint32_t seq = b->seq;
+
+	if (size == 0 || size > BC_DMP_DATA_MAX)
+		return 0;
+	seq |= 1u;
+	b->seq = seq;				/* odd: in progress */
+	BC_FENCE();
+	memcpy((void *)b->data, data, size);
+	b->kind = kind;
+	b->size = size;
+	b->crc = bc_crc32((const void *)&b->kind, 8 + size);	/* kind, size, data are contiguous */
+	BC_FENCE();
+	b->seq = seq + 1u;
+	return seq + 1u;
+}
+
+/* RTOS side: copy the image into out[cap]. 0 ok (size in *size), -1 absent/torn, -2 invalid. */
+static inline int bc_dmp_blk_read(volatile bc_dmp_blk_t *b, uint32_t kind,
+				  uint8_t *out, uint32_t cap, uint32_t *size)
+{
+	uint32_t s1, s2, sz, crc;
+
+	BC_SHM_INV(b, sizeof(*b));
+	s1 = b->seq;
+	if (s1 == 0 || (s1 & 1u))
+		return -1;
+	BC_FENCE();
+	sz = b->size;
+	if (b->kind != kind || sz == 0 || sz > BC_DMP_DATA_MAX || sz > cap)
+		return -2;
+	memcpy(out, (const void *)b->data, sz);
+	crc = b->crc;
+	BC_FENCE();
+	s2 = b->seq;
+	if (s1 != s2)
+		return -1;
+	if (crc != bc_crc32((const void *)&b->kind, 8 + sz))
+		return -2;
+	*size = sz;
+	return 0;
 }
 
 /* Telemetry reader for absolute record index n.

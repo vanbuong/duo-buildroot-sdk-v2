@@ -261,13 +261,14 @@ failure. Unknown commands increment `status.lost_cmds`.
 | Offset | Size | Writer | Content |
 |--------|------|--------|---------|
 | 0x0000 | 64 B | RTOS (once, magic last) | `magic 'BCSM'`, `version`, `size`, `boot_count`, `build_id[16]` |
-| 0x0040 | 64 B | RTOS | status: `rtos_heartbeat` (10 Hz), `state`, `fault`, `deadline_miss`, `imu_err`, `cpu_load_pct` (load of the `bc_ctrl` task = execution time / period, smoothed; **not** whole-CPU load because the idle hook is not enabled), `imu_variant` (0 unknown, 1 MPU6050, 2 MPU6500 family), `telem_head`, `event_head`, `cycles`, `lost_cmds`, `stack_min[4]` |
+| 0x0040 | 64 B | RTOS | status: `rtos_heartbeat` (10 Hz), `state`, `fault`, `deadline_miss`, `imu_err`, `cpu_load_pct` (load of the `bc_ctrl` task = execution time / period, smoothed; **not** whole-CPU load because the idle hook is not enabled), `imu_variant` (0 unknown, 1 MPU6050, 2 MPU6500 family), `dmp_info` (low byte: 0 off, 1 running, 2 load failed, 3 no image, 4 lost; upper 24 bits: DMP→filter fallback cycles), `telem_head`, `event_head`, `cycles`, `lost_cmds`, `stack_min[4]` |
 | 0x0080 | 64 B | **Linux** | `linux_heartbeat` (10 Hz), `linux_flags` |
 | 0x0100 | ≤ 1 KiB | **Linux** | parameter block (seqlock): `seq`, `crc32`, `version`, `size`, `bc_params_t` |
 | 0x0500 | ≤ 256 B | RTOS | parameter echo (what is actually in use): `seq`, `applied_count`, `last_result`, `applied_seq`, `bc_params_t` |
 | 0x0600 | 512 B | RTOS | calibration block (seqlock): `seq`, `valid`, `gyro_bias[3]` (°/s), `accel_mean[3]` (g), `trim_deg`, `temp_c`; written after boot calibration and after every runtime calibration; read by `Shm.read_calib()`, shown in `bcctl status` and `/api/status` |
 | 0x0800 | 16 KiB | RTOS | telemetry ring: 256 × 64 B at 50 Hz (≈ 5 s of history) |
 | 0x4800 | 4 KiB | RTOS | event ring: 128 × 32 B (state changes, commands, parameter results, calibration) |
+| 0x6000 | 4 KiB | **Linux** | experimental DMP image block (seqlock): `seq`, `crc32` over `kind,size,data`, `kind` (612), `size`, up to 4080 B; written by `bcd`, read by the RTOS only when `est_mode = 2` is requested while IDLE (doc 03 §3.5) |
 | 0x5800 | 42 KiB | – | reserved |
 
 Telemetry record (64 B): `seq` (2n+2 when stable), `t_us`, pitch / accel-pitch / gyro-y / gyro-z (0.01 units),
@@ -293,7 +294,7 @@ wrap, parameter block) and the Python↔C interop tests.
 
 ### 6.4 Parameter block (single source of truth) [now]
 
-All fields are 32-bit (43 parameters; the table lists them in the order of the struct); list, ranges and defaults come from one X-macro in `include/bc_params.h`
+All fields are 32-bit (44 parameters; the table lists them in the order of the struct); list, ranges and defaults come from one X-macro in `include/bc_params.h`
 (`bc_params_t`, `bc_param_table`, validation). Board-level sign overrides live in `board_pins.h`
 (`BC_BOARD_*_SIGN`); every value can be changed at run time from Linux (`bcctl set`, WebSocket `param`).
 
@@ -334,7 +335,8 @@ All fields are 32-bit (43 parameters; the table lists them in the order of the s
 | `motor_sign_r` | sign | 1 | -1 … 1 |  |
 | `enc_sign_l` | sign | 1 | -1 … 1 |  |
 | `enc_sign_r` | sign | 1 | -1 … 1 |  |
-| `est_mode` | int | 0 | 0 … 1 | 0 = gated complementary, 1 = robust Kalman |
+| `est_mode` | int | 0 | 0 … 2 | 0 = gated complementary, 1 = robust Kalman, 2 = experimental DMP angle |
+| `est_dmp_tol_deg` | float | 8.0 | 1.0 … 45.0 | mode 2: DMP angle used only while within this of the filter |
 | `est_spike_deg` | float | 20.0 | 0.0 … 90.0 | accel-angle spike rejection [deg], 0 = off |
 | `kf_q_angle` | float | 0.001 | 1e-06 … 1.0 | Kalman process noise, angle |
 | `kf_q_bias` | float | 0.003 | 1e-06 … 1.0 | Kalman process noise, gyro bias |

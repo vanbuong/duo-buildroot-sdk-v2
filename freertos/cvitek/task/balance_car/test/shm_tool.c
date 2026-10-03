@@ -95,6 +95,20 @@ int main(int argc, char **argv)
 	} else if (!strcmp(argv[1], "status")) {
 		printf("magic=%08x heartbeat=%u telem_head=%u event_head=%u state=%u\n", s->hdr.magic,
 		       s->status.rtos_heartbeat, s->status.telem_head, s->status.event_head, s->status.state);
+	} else if (!strcmp(argv[1], "dmpread")) {		/* RTOS-side reader of the image block */
+		static uint8_t buf[BC_DMP_DATA_MAX];
+		uint32_t size = 0;
+		int rc = bc_dmp_blk_read(&s->dmp, BC_DMP_KIND_612, buf, sizeof(buf), &size);
+
+		printf("rc=%d size=%u crc=%08x\n", rc, size, rc ? 0 : bc_crc32(buf, size));
+	} else if (!strcmp(argv[1], "dmpwrite") && argc > 3) {	/* Linux-side writer used for the C->Python check */
+		static uint8_t buf[BC_DMP_DATA_MAX];
+		FILE *f = fopen(argv[3], "rb");
+		size_t n = f ? fread(buf, 1, sizeof(buf), f) : 0;
+
+		if (f)
+			fclose(f);
+		printf("seq=%u\n", bc_dmp_blk_write(&s->dmp, BC_DMP_KIND_612, buf, (uint32_t)n));
 	} else if (!strcmp(argv[1], "heartbeat")) {
 		printf("%u\n", s->lnx.linux_heartbeat);
 	} else {

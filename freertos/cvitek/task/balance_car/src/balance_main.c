@@ -25,6 +25,7 @@
 #include "encoder.h"
 #include "enc_irq.h"
 #include "mpu60x0.h"
+#include "dmp612.h"
 #include "bc_core.h"
 #include "bc_cmd.h"
 #include "bc_proto.h"
@@ -45,6 +46,11 @@ static bc_core_t g_core;
 static bc_params_t g_params;
 static bc_cmd_t g_cmd;
 static int g_motors_on;
+/* experimental DMP path (est_mode 2) */
+static uint8_t g_dmp_img[DMP612_CODE_SIZE];
+static dmp_stats_t g_dmp_stats;
+static int g_dmp_active;
+static uint32_t g_dmp_state = BC_DMP_OFF;
 
 uint32_t bc_now_us(void)
 {
@@ -125,7 +131,7 @@ static void publish_telemetry(const bc_core_out_t *o, const bc_core_in_t *in,
 	t.fault = (uint8_t)o->fault;
 	t.imu_err = (uint8_t)(imu_err > 255 ? 255 : imu_err);
 	t.flags = (uint8_t)((o->gated ? 1 : 0) | (zeroed ? 2 : 0) | (hb_lost ? 4 : 0) |
-			    (o->ctl.saturated ? 8 : 0));
+			    (o->ctl.saturated ? 8 : 0) | (o->dmp_used ? 16 : 0));
 	bc_telem_push(shm, &t);
 }
 
@@ -158,6 +164,43 @@ static int calibrate_trim(float *trim_out, TickType_t *last)
 	return (fabsf(*trim_out) <= 15.0f) ? 0 : -2;
 }
 
+/* Switch between the raw-data IMU path and the DMP path. Only called while IDLE: it
+ * blocks for ~1 s (device reset + image write) like a calibration does. */
+static void dmp_apply(volatile bc_shm_t *shm, int want)
+{
+	uint32_t size = 0;
+	int rc;
+
+	if (!want) {
+		if (g_dmp_active) {		/* back to the raw configuration */
+			rc = mpu60x0_init(&g_imu, BC_MPU_I2C_ID, BC_MPU_ADDR);
+			shm->status.imu_variant = (uint32_t)g_imu.variant;
+			bc_event_push(shm, bc_now_us(), BC_EVT_LOG_CALIB, BC_CALIB_DMP, rc);
+		}
+		g_dmp_active = 0;
+		g_dmp_state = BC_DMP_OFF;
+		return;
+	}
+	rc = bc_dmp_blk_read(&shm->dmp, BC_DMP_KIND_612, g_dmp_img, sizeof(g_dmp_img), &size);
+	if (rc) {
+		g_dmp_state = BC_DMP_NO_IMAGE;
+		bc_event_push(shm, bc_now_us(), BC_EVT_LOG_CALIB, BC_CALIB_DMP, 100 + rc);
+		return;
+	}
+	rc = dmp612_load(&g_imu, g_dmp_img, size);
+	bc_event_push(shm, bc_now_us(), BC_EVT_LOG_CALIB, BC_CALIB_DMP, rc);
+	if (rc) {
+		/* restore the raw configuration so the controller keeps a sane IMU */
+		(void)mpu60x0_init(&g_imu, BC_MPU_I2C_ID, BC_MPU_ADDR);
+		shm->status.imu_variant = (uint32_t)g_imu.variant;
+		g_dmp_active = 0;
+		g_dmp_state = BC_DMP_LOAD_FAILED;
+		return;
+	}
+	g_dmp_active = 1;
+	g_dmp_state = BC_DMP_RUNNING;
+}
+
 static void publish_calibration(volatile bc_shm_t *shm, float trim_deg)
 {
 	mpu60x0_scaled_t sc;
@@ -180,7 +223,8 @@ static void balance_ctrl_task(void *arg)
 	bc_core_out_t out = { 0 };
 	int zeroed = 0, hb_lost = 0;
 	float v_t = 0.0f, w_t = 0.0f;
-	uint32_t last_recover = 0;
+	uint32_t last_recover = 0, last_dmp_pkt = 0;
+	int dmp_want_seen = 0, dmp_pending = 0, auto_calib = 0;
 	float cpu_load = 0.0f;
 
 	(void)arg;
@@ -259,6 +303,23 @@ static void balance_ctrl_task(void *arg)
 			t_prev = bc_now_us();
 		}
 
+		/* --- DMP FIFO (est_mode 2 only; the raw read above keeps running) --- */
+		in.dmp_valid = 0;
+		if (g_dmp_active) {
+			dmp_sample_t ds;
+			int dr = dmp612_poll(&g_imu, &ds, &g_dmp_stats);
+
+			if (dr == 0) {
+				dmp612_gravity(&ds, in.dmp_g);
+				in.dmp_valid = 1;
+				last_dmp_pkt = cycle;
+				if (g_dmp_state == BC_DMP_LOST)
+					g_dmp_state = BC_DMP_RUNNING;
+			} else if (cycle - last_dmp_pkt > BC_CTRL_HZ / 2) {
+				g_dmp_state = BC_DMP_LOST;	/* filter output is used meanwhile */
+			}
+		}
+
 		/* --- commands from Linux --- */
 		bc_rt_get_cmd(&spd, &trn, &tgt_ms, &mb_hb, &mb_ms);
 		g_cmd.speed_mmps = spd;
@@ -312,6 +373,10 @@ static void balance_ctrl_task(void *arg)
 		{
 			uint32_t cal = bc_rt_take_calib();
 
+			if (!cal && auto_calib && out.state == BC_ST_IDLE) {
+				cal = BC_CALIB_GYRO;	/* the gyro range changed with the DMP switch */
+				auto_calib = 0;
+			}
 			if (cal && out.state == BC_ST_IDLE) {
 				int r = -3;
 				bc_core_in_t ci = { 0 };
@@ -348,6 +413,24 @@ static void balance_ctrl_task(void *arg)
 			}
 		}
 
+		/* --- DMP on/off request (only while disarmed) --- */
+		{
+			int want = (g_params.est_mode == 2);
+
+			if (want != dmp_want_seen) {
+				dmp_want_seen = want;
+				dmp_pending = 1;
+			}
+			if (dmp_pending && out.state == BC_ST_IDLE) {
+				dmp_pending = 0;
+				dmp_apply(shm, want);
+				auto_calib = 1;
+				last_dmp_pkt = cycle;
+				last = xTaskGetTickCount();
+				t_prev = bc_now_us();
+			}
+		}
+
 		/* --- state change notifications --- */
 		if (out.state != prev_state || out.fault != prev_fault) {
 			prev_state = out.state;
@@ -364,6 +447,8 @@ static void balance_ctrl_task(void *arg)
 		shm->status.fault = (uint32_t)out.fault;
 		shm->status.imu_err = imu_err;
 		shm->status.cycles = cycle;
+		shm->status.dmp_info = g_dmp_state | ((g_core.est.dmp_fallbacks > 0xFFFFFFu ? 0xFFFFFFu :
+						       g_core.est.dmp_fallbacks) << 8);
 		/* load of THIS task (execution / period, smoothed over ~50 cycles); the
 		 * idle hook is not enabled, so it is not whole-CPU load. */
 		cpu_load += 0.02f * (100.0f * (float)exec_us / (float)(period_us ? period_us : 1u) - cpu_load);

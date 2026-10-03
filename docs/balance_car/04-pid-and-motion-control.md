@@ -7,7 +7,7 @@ Legend: **[now]** implemented in `freertos/cvitek/task/balance_car`, **[plan]** 
 host simulation (`test/`, doc 05), **[est]** assumption to verify on hardware.
 
 > **Status.** The control design below is **implemented** (`estimator.c`, `control.c`, `bc_state.c`, `bc_core.c`,
-> wired up in `balance_main.c`) and covered by 135 host tests, including a closed-loop simulation that runs the
+> wired up in `balance_main.c`) and covered by 154 host tests, including a closed-loop simulation that runs the
 > real code against a wheeled-inverted-pendulum plant. The simulation also showed that the *first* firmware version
 > (speed-loop gain `+0.05` in counts/s, 0.98 complementary filter, no gate) could not balance; those defects (C1–C10,
 > §9) are fixed. The plant is a model with **assumed** parameters, so margins must be confirmed on the real chassis
@@ -343,12 +343,13 @@ Troubleshooting:
 | `acc_max`, `alpha_max` | m/s², rad/s² | 0.5, 3 | | |
 | `v_max`, `w_max` | m/s, rad/s | 0.5, 2 | | |
 | `fall_deg`, `sat_ms` | °, ms | 45, 300 | | |
-| `est_mode` | – | 0 | 0–1 | 0 = gated complementary, 1 = robust Kalman (doc 03 §3.3) |
+| `est_mode` | – | 0 | 0–2 | 0 = gated complementary, 1 = robust Kalman (doc 03 §3.3), 2 = experimental DMP angle with filter cross-check (§3.5) |
+| `est_dmp_tol_deg` | ° | 8 | 1–45 | mode 2: the DMP angle is used only while within this of the filter |
 | `est_spike_deg` | ° | 20 | 0–90 | 0 disables the spike filter (doc 03 §3.3a) |
 | `kf_q_angle`, `kf_q_bias`, `kf_r`, `kf_robust_deg` | – | 0.001, 0.003, 3.0, 3.0 | | only used with `est_mode = 1` |
 | `x_kp`, `x_vmax` | 1/s, m/s | 0, 0.15 | | position hold; 0 = off |
 
-The table lists the parameters added since the first version; the total is **43** (see `bc_params.h` / generated `bc_layout.py`).
+The table lists the parameters added since the first version; the total is **44** (see `bc_params.h` / generated `bc_layout.py`).
 
 ## 11. Validation hooks
 

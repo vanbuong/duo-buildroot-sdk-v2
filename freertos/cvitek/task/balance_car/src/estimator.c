@@ -8,6 +8,7 @@ static float accel_pitch(float ax, float ay, float az)
 	return atan2f(-ax, sqrtf(ay * ay + az * az)) * RAD2DEG;
 }
 
+#define DMP_HOLD_CYCLES	200	/* 1 s at 200 Hz: no flapping between two disagreeing angle sources */
 #define SPIKE_RUN_MAX	200	/* 1 s at 200 Hz: if every sample is "wrong", the estimate is */
 
 void bc_est_reset(bc_est_t *e)
@@ -21,6 +22,21 @@ void bc_est_reset(bc_est_t *e)
 	e->spikes = 0;
 	e->P[0][0] = 0.5f; e->P[0][1] = 0.0f;
 	e->P[1][0] = 0.0f; e->P[1][1] = 1.0f;
+	e->theta_out = 0.0f;
+	e->dmp_valid = 0;
+	e->dmp_g[0] = e->dmp_g[1] = e->dmp_g[2] = 0.0f;
+	e->theta_dmp = 0.0f;
+	e->dmp_used = 0;
+	e->dmp_fallbacks = 0;
+	e->dmp_hold = 0;
+}
+
+void bc_est_set_dmp(bc_est_t *e, int valid, const float g[3])
+{
+	e->dmp_valid = valid;
+	if (valid) {
+		e->dmp_g[0] = g[0]; e->dmp_g[1] = g[1]; e->dmp_g[2] = g[2];
+	}
 }
 
 void bc_est_init_accel(bc_est_t *e, const bc_params_t *p,
@@ -30,6 +46,7 @@ void bc_est_init_accel(bc_est_t *e, const bc_params_t *p,
 	e->norm = sqrtf(ax * ax + ay * ay + az * az);
 	e->theta_acc = (float)p->imu_sign * accel_pitch(ax, ay, az);
 	e->theta = e->theta_acc;
+	e->theta_out = e->theta;
 	e->initialized = 1;
 }
 
@@ -129,4 +146,25 @@ void bc_est_update(bc_est_t *e, const bc_params_t *p,
 		e->omega = rate_raw - e->bias;
 		update_complementary(e, p, e->omega, dt);
 	}
+	e->theta_out = e->theta;
+	e->dmp_used = 0;
+	if (p->est_mode == 2) {
+		/* the filter above keeps running on raw data; the DMP angle only replaces its
+		 * output while it is fresh and agrees (a stuck/garbled DMP cannot steer the car) */
+		if (e->dmp_valid) {
+			e->theta_dmp = (float)p->imu_sign *
+				       accel_pitch(e->dmp_g[0], e->dmp_g[1], e->dmp_g[2]);
+			if (fabsf(e->theta_dmp - e->theta) > p->est_dmp_tol_deg)
+				e->dmp_hold = DMP_HOLD_CYCLES;	/* disagreement: filter in charge */
+			else if (e->dmp_hold > 0)
+				e->dmp_hold--;			/* DMP must agree for 1 s to come back */
+			if (e->dmp_hold == 0) {
+				e->theta_out = e->theta_dmp;
+				e->dmp_used = 1;
+			}
+		}
+		if (!e->dmp_used)
+			e->dmp_fallbacks++;
+	}
+	e->dmp_valid = 0;
 }

@@ -26,12 +26,15 @@ typedef struct {
 	double push_at_s, push_rad_s;	/* impulse on pitch rate, after release */
 	double unplug_at_s;		/* IMU stops answering, <0 = never    */
 	double seconds;			/* simulated time after release       */
+	int dmp;			/* 0 none, 1 true angle, 2 frozen at 0 deg (broken DMP) */
 } sim_cfg_t;
 
 typedef struct {
 	double max_theta_deg;
 	double tail_theta_deg;		/* max |theta| over the last second   */
 	double max_x_m;
+	unsigned dmp_fallbacks;		/* est_mode 2: cycles that used the filter */
+	int dmp_used_cycles;
 	double final_x_m;		/* signed position at the end         */
 	double tail_speed_mps;
 	int fell;			/* core went to FALLEN/FAULT after release */
@@ -136,6 +139,12 @@ static sim_res_t run_sim(const sim_cfg_t *c)
 		in.ax = sc.ax; in.ay = sc.ay; in.az = sc.az;
 		in.gy = sc.gy; in.gz = sc.gz;
 		in.raw_gx = imu.gx; in.raw_gy = imu.gy; in.raw_gz = imu.gz;
+		if (c->dmp) {
+			in.dmp_valid = 1;
+			in.dmp_g[0] = c->dmp == 1 ? (float)-s : 0.0f;
+			in.dmp_g[1] = 0.0f;
+			in.dmp_g[2] = c->dmp == 1 ? (float)co : 1.0f;
+		}
 		in.enc_l = in.enc_r = (int32_t)plant_encoder_counts(&pl);
 		in.v_target = in.w_target = 0.0f;
 		in.dt = (float)DT;
@@ -145,6 +154,8 @@ static sim_res_t run_sim(const sim_cfg_t *c)
 		if (i == 1) in.events = BC_EV_CALIB_OK;
 		if (i == 2) in.events = BC_EV_ARM;
 		bc_core_step(&core, &in, &out);
+		if (out.dmp_used)
+			r.dmp_used_cycles++;
 
 		/* state sequence bookkeeping */
 		if (out.state != prev_state) {
@@ -205,6 +216,7 @@ static sim_res_t run_sim(const sim_cfg_t *c)
 	}
 	(void)n_after; (void)total;
 	r.final_x_m = pl.x;
+	r.dmp_fallbacks = core.est.dmp_fallbacks;
 	r.released = saw_bal;
 	r.seq_ok = order_ok && saw_calib && saw_idle && saw_arming && saw_bal;
 	r.final_state = out.state;
@@ -304,6 +316,35 @@ static void sim_position_hold_stays_stable_and_bounded(void)
 	CHECK(on.tail_theta_deg < 3.0);
 }
 
+static void sim_dmp_mode_balances_with_a_good_dmp_angle(void)
+{
+	sim_cfg_t c = cfg_default();
+	sim_res_t r;
+
+	c.p.est_mode = 2;
+	c.dmp = 1;
+	r = run_sim(&c);
+	CHECK(!r.fell);
+	CHECK(r.tail_theta_deg < 3.0);
+	CHECK(r.dmp_used_cycles > 1000);		/* it really was in the loop */
+}
+
+static void sim_dmp_mode_survives_a_frozen_dmp(void)
+{
+	/* the DMP stops updating (reports 0 deg forever): its disagreement with the always
+	 * running filter must hand control back to the filter */
+	sim_cfg_t c = cfg_default();
+	sim_res_t r;
+
+	c.p.est_mode = 2;
+	c.dmp = 2;
+	c.theta0_deg = 7.0;
+	r = run_sim(&c);
+	printf("  frozen DMP: fell=%d max=%.1f deg fallbacks=%u\n", r.fell, r.max_theta_deg, r.dmp_fallbacks);
+	CHECK(!r.fell);
+	CHECK(r.dmp_fallbacks > 100);
+}
+
 static void sim_starts_from_larger_lean(void)
 {
 	sim_cfg_t c = cfg_default();
@@ -384,6 +425,8 @@ void suite_sim(void)
 	RUN(sim_kalman_mode_balances_across_plant_gains);
 	RUN(sim_tolerates_sensor_noise);
 	RUN(sim_recovers_from_push);
+	RUN(sim_dmp_mode_balances_with_a_good_dmp_angle);
+	RUN(sim_dmp_mode_survives_a_frozen_dmp);
 	RUN(sim_position_hold_stays_stable_and_bounded);
 	RUN(sim_starts_from_larger_lean);
 	RUN(sim_speed_loop_stable_up_to_4_deg_per_mps);

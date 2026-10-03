@@ -5,6 +5,7 @@
   bcctl arm | disarm | estop | target V W | ping
   bcctl get [NAME] | set NAME VALUE | save | load
   bcctl calib gyro|trim
+  bcctl dmp-pack SRC.cpp DST [--force] | dmp-load [FILE] | dmp-status   (experimental est_mode 2)
 Works without bcd (talks to the shared window and the mailbox directly).
 """
 import argparse
@@ -13,6 +14,7 @@ import sys
 import time
 
 import bc_layout as L
+import bc_dmp as D
 import bc_shm as S
 
 PARAMS_FILE = "/mnt/data/bc_params.json"
@@ -72,7 +74,24 @@ def main(argv=None):
     s.add_argument("value", type=float)
     c = sub.add_parser("calib")
     c.add_argument("what", choices=("gyro", "trim"))
+    dp = sub.add_parser("dmp-pack")
+    dp.add_argument("src")
+    dp.add_argument("dst")
+    dp.add_argument("--force", action="store_true")
+    dl = sub.add_parser("dmp-load")
+    dl.add_argument("file", nargs="?", default=D.DEFAULT_PATH)
+    dl.add_argument("--force", action="store_true")
+    sub.add_parser("dmp-status")
     args = ap.parse_args(argv)
+
+    if args.cmd == "dmp-pack":
+        try:
+            n, crc = D.pack(args.src, args.dst, args.force)
+        except (D.DmpError, OSError) as exc:
+            print("dmp-pack: %s" % exc, file=sys.stderr)
+            return 1
+        print("wrote %d bytes, crc32 0x%08X" % (n, crc))
+        return 0
 
     shm, mbox = open_all(args)
     if args.cmd == "status":
@@ -137,6 +156,18 @@ def main(argv=None):
         with open(PARAMS_FILE) as f:
             ok = apply_param(shm, mbox, json.load(f))
         print("applied" if ok else "RTOS did not confirm")
+    elif args.cmd == "dmp-load":
+        try:
+            D.write_image(shm, D.load_file(args.file, args.force))
+        except (D.DmpError, OSError) as exc:
+            print("dmp-load: %s" % exc, file=sys.stderr)
+            return 1
+        print("image written; set est_mode 2 (bcctl set est_mode 2) while the robot is disarmed")
+    elif args.cmd == "dmp-status":
+        st = shm.status()
+        print(json.dumps({"state": D.state_name(st), "fallbacks": D.fallbacks(st),
+                          "image_in_shm": D.read_image(shm) is not None,
+                          "imu_variant": st["imu_variant"]}, indent=1))
     elif args.cmd == "calib":
         mbox.send(L.BC_CMD_CALIBRATE, L.BC_CALIB_GYRO if args.what == "gyro" else L.BC_CALIB_TRIM)
     return 0

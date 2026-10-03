@@ -22,8 +22,9 @@
 	X(est_alpha,      F, 0.998f, 0.90f,  0.9999f) /* complementary gyro weight */ \
 	X(est_gate_g,     F, 0.10f,  0.0f,   1.0f)    /* accel norm gate, 0 = off  */ \
 	X(est_bias_gain,  F, 0.02f,  0.0f,   1.0f)    /* online gyro bias, 1/s     */ \
-	X(est_mode,       I, 0,      0,      1)       /* 0 complementary, 1 Kalman */ \
+	X(est_mode,       I, 0,      0,      2)       /* 0 complementary, 1 Kalman, 2 DMP angle (experimental, needs image) */ \
 	X(est_spike_deg,  F, 20.0f,  0.0f,   90.0f)   /* reject accel angle this far from the prediction, 0 = off */ \
+	X(est_dmp_tol_deg, F, 8.0f,  1.0f,   45.0f)   /* mode 2: DMP angle used only while within this of the complementary filter */ \
 	X(kf_q_angle,     F, 0.001f, 0.000001f, 1.0f) /* Kalman process noise, angle */ \
 	X(kf_q_bias,      F, 0.003f, 0.000001f, 1.0f) /* Kalman process noise, bias  */ \
 	X(kf_r,           F, 3.0f,   0.0001f, 10.0f)  /* Kalman accel measurement noise [deg^2] */ \

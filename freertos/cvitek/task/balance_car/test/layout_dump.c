@@ -36,6 +36,11 @@ int main(void)
 	P("telem_state", offsetof(bc_telem_t, state));
 	P("telem_psi", offsetof(bc_telem_t, psi_mrad));
 	P("telem_x", offsetof(bc_telem_t, x_mm));
+	P("off_dmp", offsetof(bc_shm_t, dmp));
+	P("dmp_data", offsetof(bc_dmp_blk_t, data));
+	P("dmp_data_max", BC_DMP_DATA_MAX);
+	P("dmp_kind_612", BC_DMP_KIND_612);
+	P("status_dmp_info", offsetof(bc_shm_status_t, dmp_info));
 	P("status_imu_variant", offsetof(bc_shm_status_t, imu_variant));
 	P("telem_crc", offsetof(bc_telem_t, crc));
 	P("status_heartbeat", offsetof(bc_shm_status_t, rtos_heartbeat));

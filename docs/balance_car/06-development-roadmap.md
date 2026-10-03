@@ -14,7 +14,7 @@ who knows the SDK; widen by 1.5× for someone new to it).
 |-----------|--------|-------|
 | M0 Hardware/ownership validation | **partly done** | software side done: IMU on I2C0 (`BC_MPU_I2C_ID`), Linux PWM module not loaded, `&i2c4`/`&spi3` disabled, image size measured (99 KB text, headroom 1.2 MiB before the shm window). **Hardware items open:** IIC0 pad routing, STBY pull-down, e-stop, battery sense, HIL-01/03/04 |
 | M1 Safety/correctness fixes | **done** | S1, S3, S5, S11, S13, C1–C3 fixed (sign/units/gains, boot to IDLE, coast + STBY off outside BALANCING, printf out of the loop) |
-| M2 Estimator + controller as pure modules | **done** | gated filter + bias tracking, derivative-on-rate, speed PI in m/s, turn PI, slew, mixer, state machine, health monitor; **plus** spike filter, optional robust Kalman, odometry, optional position hold, MPU6050/6500 variant detection with read-back-verified init; 135 host tests |
+| M2 Estimator + controller as pure modules | **done** | gated filter + bias tracking, derivative-on-rate, speed PI in m/s, turn PI, slew, mixer, state machine, health monitor; **plus** spike filter, optional robust Kalman, odometry, optional position hold, MPU6050/6500 variant detection with read-back-verified init; 154 host tests |
 | M3 Real-time structure | **mostly done** | blocking task, measured dt, timing statistics, console task, IRQ encoders (`BC_ENC_USE_IRQ`), IMU burst. I2C bus recovery and `bc_ctrl` task-load measurement added (both unverified on hardware). **Not done:** HW-timer pacing (tick-paced), PWM update-in-place (S12); IRQ path unverified on hardware |
 | M4 Linux↔RTOS interface | **done** | `IP_BALANCE` (both headers), `bc_shm` window + linker assert, seqlock rings, parameter block/echo, heartbeat watchdog, Linux emergency STBY clear, `bcd`/`bcctl`; RTOS→Linux mailbox events deliberately off (shm ring instead) |
 | M5 Wi-Fi teleoperation | **done in software** | `bc-net.sh` (STA, AP fallback if hostapd present), WebSocket server, web UI, dead-man; **not run**; `BR2_PACKAGE_HOSTAPD=y` is in the four DuoS defconfigs; telemetry logging (rotating JSONL) added |
@@ -258,8 +258,8 @@ can overlap M2–M3 with M5–M6 after M4's interface is agreed and shave ≈ 2 
 | `freertos/cvitek/task/comm/`, `driver/rtos_cmdqu/`, `osdrv/interdrv/rtos_cmdqu/` | `IP_BALANCE` routing |
 | `freertos/cvitek/scripts/cv181x_lscript.ld`, `kernel/include/riscv64/FreeRTOSConfig.h` | shm window assertion, stack watermark API |
 | `freertos/cvitek/task/CMakeLists.txt`, `task/main/CMakeLists.txt` | balance firmware only for `cv181x` |
-| `freertos/cvitek/task/balance_car/test/` | 135 host tests, fakes, simulation, helper tools |
-| `freertos/cvitek/task/balance_car/linux_tests/`, `tools/` | 71 Python tests; layout generator, RTOS build check, DTS check |
+| `freertos/cvitek/task/balance_car/test/` | 154 host tests, fakes, simulation, helper tools |
+| `freertos/cvitek/task/balance_car/linux_tests/`, `tools/` | 86 Python tests; layout generator, RTOS build check, DTS check |
 | `device/generic/rootfs_overlay/duos/mnt/system/bc/` | `bcd`, `bcctl`, `bc_shm`, `bc_camera`, scripts, web UI, generated layout |
 | `device/generic/rootfs_overlay/duos/mnt/system/duo-init.sh` | starts the services, no Linux PWM module |
 | `build/boards/cv181x/*duos*/dts_*/*.dts` | `&i2c4`, `&spi3` disabled |
@@ -277,4 +277,6 @@ jitter test (`PERF-03`); HIL nightly runner (needs a board on a self-hosted runn
 **Not hardware-dependent but deliberately not done:** hardware-timer-paced control and PWM update-in-place (S12) – both change the
 real-time core and are only worth doing once measurements on a board show the tick-paced loop or the PWM restart glitch is a problem;
 mailbox events RTOS→Linux (the shm ring is used and works); OSD and embedded video in the web page (depend on the media stack);
-DMP use (see doc 03 §2.2a – decided against).
+DMP as the default estimator (decided against; see doc 03 §2.2a).
+
+**Added as an experiment, not verified on hardware:** `est_mode = 2` DMP angle with the MotionApps 6.12 image (doc 03 §3.5) – needs a bench test with the wheels off the ground, and a decision on whether the MPU6500 family accepts the image.

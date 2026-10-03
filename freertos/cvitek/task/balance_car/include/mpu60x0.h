@@ -36,6 +36,7 @@ typedef struct {
 	float gyro_bias[3];
 	float accel_mean[3];
 	int calibrated;
+	float gyro_lsb;			/* LSB per deg/s of the configured range (0 = default) */
 } mpu60x0_t;
 
 typedef struct {
@@ -51,6 +52,11 @@ typedef struct {
  */
 int mpu60x0_init(mpu60x0_t *imu, uint8_t i2c_id, uint8_t addr);
 int mpu60x0_read(mpu60x0_t *imu);
+
+/* Raw register access for sibling drivers (DMP). 0 on success. */
+int mpu60x0_reg_write(mpu60x0_t *imu, uint8_t reg, uint8_t val);
+int mpu60x0_reg_read(mpu60x0_t *imu, uint8_t reg, uint8_t *buf, uint16_t len);
+int mpu60x0_reg_write_n(mpu60x0_t *imu, uint8_t reg, const uint8_t *buf, uint16_t len);
 void mpu60x0_scale(const mpu60x0_t *imu, mpu60x0_scaled_t *out);
 /*
  * Average `samples` frames (robot still): gyro bias for all axes and the mean
